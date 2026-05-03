@@ -1,0 +1,11 @@
+# Cargo + Solana SBF build artifacts
+target/
+**/*.rs.bk
+
+# Solana keypairs — never commit private keys
+*-keypair.json
+
+# IDE / OS noise
+.DS_Store
+.vscode/
+.idea/
