@@ -19,3 +19,4 @@ pub const SEED_STABLECOIN_REGISTRY: &[u8] = b"stablecoin_registry";
 pub const SEED_WUSD_MINT: &[u8] = b"wusd_mint";
 pub const SEED_WUSD_AUTHORITY: &[u8] = b"wusd_authority";
 pub const SEED_WUSD_RESERVE: &[u8] = b"wusd_reserve";
+pub const SEED_SESSION: &[u8] = b"session";

@@ -129,6 +129,20 @@ pub enum PolyleverageError {
     #[error("insufficient stablecoin reserve for unwrap")]
     InsufficientStablecoinReserve = 722,
 
+    // ---- Zero-click session (one-click trading) ----
+    #[error("session not active (revoked / expired / cap reached)")]
+    SessionNotActive = 800,
+    #[error("session delegate signer mismatch")]
+    SessionDelegateMismatch = 801,
+    #[error("session owner mismatch with margin account")]
+    SessionOwnerMismatch = 802,
+    #[error("session not authorized for this instrument")]
+    SessionInstrumentNotAllowed = 803,
+    #[error("session per-intent collateral cap exceeded")]
+    SessionPerIntentCapExceeded = 804,
+    #[error("session cumulative collateral cap exceeded")]
+    SessionCumulativeCapExceeded = 805,
+
     // ---- Catch-all ----
     #[error("unsupported instruction")]
     UnsupportedInstruction = 900,

@@ -219,6 +219,24 @@ pub struct UnwrapStablecoinArgs {
     pub amount: u64,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]
+pub struct CreateSessionArgs {
+    /// TEE-derived per-user delegate Ed25519 pubkey.
+    pub delegate: [u8; 32],
+    /// Solana slot at which the session auto-revokes. Must be > current slot.
+    pub expires_at_slot: u64,
+    /// Per-PostIntent collateral cap (atoms = contracts × bucket × leverage,
+    /// pre-fee). Bounds the blast radius of a single delegate-signed action.
+    pub per_intent_max_collateral_atoms: u64,
+    /// Cumulative cap over the session's lifetime (sum of per-intent
+    /// collateral). Bounds the blast radius of a TEE compromise.
+    pub cumulative_collateral_cap: u64,
+    /// Allowlist of instrument PDAs the session can trade. Empty = any
+    /// instrument (NOT recommended; UIs should always populate).
+    /// Capped at MAX_SESSION_INSTRUMENTS = 8.
+    pub allowed_instruments: Vec<[u8; 32]>,
+}
+
 /// Instruction tag. Stable wire-format byte — do not reorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -244,6 +262,11 @@ pub enum InstructionTag {
     MatchPair = 32,
     MatchBestAvailable = 33,
     PruneExpired = 34,
+    // One-click trading sessions (delegate-signed PostIntent / CancelIntent)
+    CreateSession = 35,
+    RevokeSession = 36,
+    PostIntentDelegated = 37,
+    CancelIntentDelegated = 38,
 
     // Position lifecycle
     Liquidate = 40,
@@ -300,6 +323,10 @@ impl TryFrom<u8> for InstructionTag {
             32 => MatchPair,
             33 => MatchBestAvailable,
             34 => PruneExpired,
+            35 => CreateSession,
+            36 => RevokeSession,
+            37 => PostIntentDelegated,
+            38 => CancelIntentDelegated,
             40 => Liquidate,
             41 => Resolve,
             42 => CloseMutual,

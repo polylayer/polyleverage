@@ -23,6 +23,7 @@ pub mod multisig;
 pub mod novate;
 pub mod reentry;
 pub mod registries;
+pub mod session;
 pub mod settlement;
 pub mod substitute;
 pub mod timelock;
@@ -125,6 +126,20 @@ pub fn process(
         }
         InstructionTag::PruneExpired => {
             close_prune::process_prune_expired(program_id, accounts)
+        }
+        InstructionTag::CreateSession => {
+            let args = CreateSessionArgs::try_from_slice(payload)
+                .map_err(|_| PolyleverageError::InvalidInstructionData)?;
+            session::process_create_session(program_id, accounts, args)
+        }
+        InstructionTag::RevokeSession => {
+            session::process_revoke_session(program_id, accounts)
+        }
+        InstructionTag::PostIntentDelegated | InstructionTag::CancelIntentDelegated => {
+            // Wired in the next commit (Phase 1c). For now reject so a
+            // mis-routed call from a client that already knows about
+            // these tags fails loudly instead of misdispatching.
+            Err(PolyleverageError::UnsupportedInstruction.into())
         }
         InstructionTag::Novate => {
             let args = NovateArgs::try_from_slice(payload)

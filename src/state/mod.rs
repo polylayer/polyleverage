@@ -13,6 +13,7 @@ pub mod market_nonce;
 pub mod pmlc;
 pub mod program_config;
 pub mod seat_tree;
+pub mod session;
 pub mod timelock;
 pub mod user_volume;
 
@@ -27,6 +28,7 @@ pub use margin_account::*;
 pub use market_nonce::*;
 pub use pmlc::*;
 pub use program_config::*;
+pub use session::*;
 pub use timelock::*;
 pub use user_volume::*;
 
