@@ -135,11 +135,15 @@ pub fn process(
         InstructionTag::RevokeSession => {
             session::process_revoke_session(program_id, accounts)
         }
-        InstructionTag::PostIntentDelegated | InstructionTag::CancelIntentDelegated => {
-            // Wired in the next commit (Phase 1c). For now reject so a
-            // mis-routed call from a client that already knows about
-            // these tags fails loudly instead of misdispatching.
-            Err(PolyleverageError::UnsupportedInstruction.into())
+        InstructionTag::PostIntentDelegated => {
+            let args = PostIntentArgs::try_from_slice(payload)
+                .map_err(|_| PolyleverageError::InvalidInstructionData)?;
+            intent::process_post_intent_delegated(program_id, accounts, args)
+        }
+        InstructionTag::CancelIntentDelegated => {
+            let args = CancelIntentArgs::try_from_slice(payload)
+                .map_err(|_| PolyleverageError::InvalidInstructionData)?;
+            intent::process_cancel_intent_delegated(program_id, accounts, args)
         }
         InstructionTag::Novate => {
             let args = NovateArgs::try_from_slice(payload)
