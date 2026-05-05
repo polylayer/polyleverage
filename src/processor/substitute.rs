@@ -33,6 +33,7 @@ use crate::{
     error::PolyleverageError,
     instruction::MatchPairArgs,
     math,
+    processor::match_ix::release_fee_buffer_for_fill,
     seeds::SEED_MARGIN,
     state::{
         intent_tree, BookMut, InstrumentConfig, IntentNode, MarginAccount, Pmlc, NODE_TAG_INTENT,
@@ -198,7 +199,11 @@ fn do_substitute(
         // Correction: the substitutor is EXITING a position. If they own LONG on PMLC
         // and want to exit, they post a SHORT intent to net out. So substitutor_is_short
         // (their NEW intent is short) ⇒ they own LONG of PMLC.
-        let substitutor_pmlc_side = if substitutor_is_short { SIDE_LONG } else { SIDE_SHORT };
+        let substitutor_pmlc_side = if substitutor_is_short {
+            SIDE_LONG
+        } else {
+            SIDE_SHORT
+        };
         let expected_pmlc_owner = match substitutor_pmlc_side {
             SIDE_LONG => pmlc_long_owner,
             SIDE_SHORT => pmlc_short_owner,
@@ -209,12 +214,18 @@ fn do_substitute(
         }
 
         // New PMLC owner is the counterparty.
-        let new_pmlc_owner = if substitutor_is_long { short_trader } else { long_trader };
+        let new_pmlc_owner = if substitutor_is_long {
+            short_trader
+        } else {
+            long_trader
+        };
 
         // Consume one contract from each intent.
         let per_contract_reserve = collateral_bucket;
         let mut long = long;
         let mut short = short;
+        let long_remaining_before = long.contracts_remaining;
+        let short_remaining_before = short.contracts_remaining;
         long.contracts_remaining = long.contracts_remaining.saturating_sub(1);
         short.contracts_remaining = short.contracts_remaining.saturating_sub(1);
         long.reserved_collateral = long
@@ -226,10 +237,24 @@ fn do_substitute(
             .checked_sub(per_contract_reserve)
             .ok_or(PolyleverageError::InsufficientReservedCollateral)?;
 
-        let per_contract_fee_buf_long = long.fee_buffer / long.contracts_total.max(1) as u64;
-        let per_contract_fee_buf_short = short.fee_buffer / short.contracts_total.max(1) as u64;
-        long.fee_buffer = long.fee_buffer.saturating_sub(per_contract_fee_buf_long);
-        short.fee_buffer = short.fee_buffer.saturating_sub(per_contract_fee_buf_short);
+        let fee_buf_release_long = if long_remaining_before == 1 {
+            long.fee_buffer
+        } else {
+            release_fee_buffer_for_fill(long.fee_buffer, long_remaining_before, 1)?
+        };
+        let fee_buf_release_short = if short_remaining_before == 1 {
+            short.fee_buffer
+        } else {
+            release_fee_buffer_for_fill(short.fee_buffer, short_remaining_before, 1)?
+        };
+        long.fee_buffer = long
+            .fee_buffer
+            .checked_sub(fee_buf_release_long)
+            .ok_or(PolyleverageError::ArithmeticUnderflow)?;
+        short.fee_buffer = short
+            .fee_buffer
+            .checked_sub(fee_buf_release_short)
+            .ok_or(PolyleverageError::ArithmeticUnderflow)?;
 
         *book.intent_mut(long_idx)? = long;
         *book.intent_mut(short_idx)? = short;
@@ -247,8 +272,8 @@ fn do_substitute(
             substitutor_pmlc_side,
             new_pmlc_owner,
             per_contract_collateral: per_contract_reserve,
-            per_contract_fee_buf_long,
-            per_contract_fee_buf_short,
+            per_contract_fee_buf_long: fee_buf_release_long,
+            per_contract_fee_buf_short: fee_buf_release_short,
             substitutor_is_long,
             match_midpoint,
         }
@@ -279,12 +304,20 @@ fn do_substitute(
 
     // --- Validate margin PDAs ---
     let _ = assert_pda(
-        &[SEED_MARGIN, substitutor.key.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            substitutor.key.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         substitutor_margin_ai.key,
     )?;
     let _ = assert_pda(
-        &[SEED_MARGIN, ctx.new_pmlc_owner.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            ctx.new_pmlc_owner.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         counterparty_margin_ai.key,
     )?;

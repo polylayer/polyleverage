@@ -106,6 +106,8 @@ pub enum PolyleverageError {
     FeeScheduleNotInitialized = 500,
     #[error("fee increase blocked; only decreases allowed without drain")]
     FeeIncreaseBlocked = 501,
+    #[error("fee accounts are required for matching")]
+    FeeAccountsRequired = 502,
 
     // ---- Misc ----
     #[error("timelock not yet executable")]

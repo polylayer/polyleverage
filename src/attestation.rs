@@ -151,6 +151,13 @@ pub fn verify_via_ed25519_sysvar<'info>(
         return Err(PolyleverageError::MissingEd25519Verify.into());
     }
 
+    extract_verified_ed25519_message(&ix.data, expected_pubkey)
+}
+
+fn extract_verified_ed25519_message(
+    data: &[u8],
+    expected_pubkey: &Pubkey,
+) -> Result<[u8; ATTESTATION_LEN], ProgramError> {
     // Layout per solana-sdk/src/ed25519_instruction.rs:
     //   [0]   u8  num_signatures
     //   [1]   u8  padding
@@ -162,18 +169,30 @@ pub fn verify_via_ed25519_sysvar<'info>(
     //   [10..12] u16 message_data_offset
     //   [12..14] u16 message_data_size
     //   [14..16] u16 message_instruction_index
-    let data = &ix.data;
     if data.len() < 16 {
         return Err(PolyleverageError::MissingEd25519Verify.into());
     }
     let num_signatures = data[0];
-    if num_signatures != 1 {
+    if num_signatures != 1 || data[1] != 0 {
         return Err(PolyleverageError::MissingEd25519Verify.into());
     }
     let signature_offset = u16::from_le_bytes([data[2], data[3]]) as usize;
+    let signature_ix_index = u16::from_le_bytes([data[4], data[5]]);
     let public_key_offset = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let public_key_ix_index = u16::from_le_bytes([data[8], data[9]]);
     let message_offset = u16::from_le_bytes([data[10], data[11]]) as usize;
     let message_size = u16::from_le_bytes([data[12], data[13]]) as usize;
+    let message_ix_index = u16::from_le_bytes([data[14], data[15]]);
+
+    // This parser reads pubkey/signature/message bytes from the loaded Ed25519
+    // instruction itself. Solana uses u16::MAX to mean "same instruction"; any
+    // other index would point the precompile at bytes from a different tx ix.
+    if signature_ix_index != u16::MAX
+        || public_key_ix_index != u16::MAX
+        || message_ix_index != u16::MAX
+    {
+        return Err(PolyleverageError::MissingEd25519Verify.into());
+    }
 
     let pk_bytes = data
         .get(public_key_offset..public_key_offset + 32)
@@ -243,6 +262,53 @@ mod tests {
         bytes[ATTESTATION_PAYLOAD_OFFSET..ATTESTATION_PAYLOAD_OFFSET + plen]
             .copy_from_slice(&payload[..plen]);
         bytes
+    }
+
+    fn build_ed25519_ix_data(pubkey: &Pubkey, msg: &[u8]) -> Vec<u8> {
+        const HEADER_LEN: usize = 16;
+        let signature_offset = HEADER_LEN as u16;
+        let public_key_offset = (HEADER_LEN + 64) as u16;
+        let message_offset = (HEADER_LEN + 64 + 32) as u16;
+        let mut data = vec![0u8; message_offset as usize + msg.len()];
+        data[0] = 1;
+        data[1] = 0;
+        data[2..4].copy_from_slice(&signature_offset.to_le_bytes());
+        data[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
+        data[6..8].copy_from_slice(&public_key_offset.to_le_bytes());
+        data[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        data[10..12].copy_from_slice(&message_offset.to_le_bytes());
+        data[12..14].copy_from_slice(&(msg.len() as u16).to_le_bytes());
+        data[14..16].copy_from_slice(&u16::MAX.to_le_bytes());
+        data[public_key_offset as usize..public_key_offset as usize + 32]
+            .copy_from_slice(pubkey.as_ref());
+        data[message_offset as usize..message_offset as usize + msg.len()].copy_from_slice(msg);
+        data
+    }
+
+    #[test]
+    fn ed25519_extract_accepts_same_instruction_offsets() {
+        let signer = Pubkey::new_unique();
+        let msg = build_attestation(ATT_TYPE_RESOLUTION, [9u8; 32], 1_000_000, 7, &[0u8; 48]);
+        let data = build_ed25519_ix_data(&signer, &msg);
+
+        assert_eq!(
+            extract_verified_ed25519_message(&data, &signer).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn ed25519_extract_rejects_cross_instruction_offsets() {
+        let signer = Pubkey::new_unique();
+        let msg = build_attestation(ATT_TYPE_RESOLUTION, [9u8; 32], 1_000_000, 7, &[0u8; 48]);
+        let mut data = build_ed25519_ix_data(&signer, &msg);
+        data[14..16].copy_from_slice(&0u16.to_le_bytes());
+
+        assert!(matches!(
+            extract_verified_ed25519_message(&data, &signer),
+            Err(ProgramError::Custom(code))
+                if code == PolyleverageError::MissingEd25519Verify as u32
+        ));
     }
 
     #[test]

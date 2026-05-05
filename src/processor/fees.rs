@@ -25,15 +25,13 @@ use crate::{
     instruction::{FeeTier, InitFeeScheduleArgs, SetFeeScheduleArgs, SweepFeesArgs},
     seeds::{SEED_FEE_SCHEDULE, SEED_TREASURY, SEED_VAULT},
     state::{
-        compute_max_fee_bps, validate_tiers, FeeSchedule, FeeTierRaw, FeeTreasury,
-        ProgramConfig, FEE_SCHEDULE_LEN, FEE_SCHEDULE_MAX_TIERS, FEE_TREASURY_LEN,
+        compute_max_fee_bps, validate_tiers, FeeSchedule, FeeTierRaw, FeeTreasury, ProgramConfig,
+        FEE_SCHEDULE_LEN, FEE_SCHEDULE_MAX_TIERS, FEE_TREASURY_LEN,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
 
-fn to_raw_tiers(
-    tiers: &[FeeTier; FEE_SCHEDULE_MAX_TIERS],
-) -> [FeeTierRaw; FEE_SCHEDULE_MAX_TIERS] {
+fn to_raw_tiers(tiers: &[FeeTier; FEE_SCHEDULE_MAX_TIERS]) -> [FeeTierRaw; FEE_SCHEDULE_MAX_TIERS] {
     let mut out = [FeeTierRaw {
         volume_threshold: 0,
         fee_bps: 0,
@@ -100,7 +98,11 @@ pub fn process_init_fee_schedule(
             FEE_SCHEDULE_LEN as u64,
             program_id,
         ),
-        &[admin.clone(), fee_schedule_ai.clone(), system_program.clone()],
+        &[
+            admin.clone(),
+            fee_schedule_ai.clone(),
+            system_program.clone(),
+        ],
         &[&[SEED_FEE_SCHEDULE, &[bump]]],
     )?;
 
@@ -269,14 +271,18 @@ pub fn ensure_fee_treasury<'info>(
     mint: &Pubkey,
     system_program: &AccountInfo<'info>,
 ) -> ProgramResult {
+    let bump = assert_pda(&[SEED_TREASURY, mint.as_ref()], program_id, treasury_ai.key)?;
     if treasury_ai.data_len() != 0 {
+        if treasury_ai.owner != program_id {
+            return Err(PolyleverageError::InvalidAccountOwner.into());
+        }
+        let data = treasury_ai.try_borrow_data()?;
+        let treasury = FeeTreasury::load(&data)?;
+        if treasury.collateral_mint != *mint || treasury.bump != bump {
+            return Err(PolyleverageError::InvalidPda.into());
+        }
         return Ok(());
     }
-    let bump = assert_pda(
-        &[SEED_TREASURY, mint.as_ref()],
-        program_id,
-        treasury_ai.key,
-    )?;
     let rent = Rent::get()?;
     invoke_signed(
         &solana_program::system_instruction::create_account(

@@ -19,7 +19,7 @@ use crate::{
     error::PolyleverageError,
     instruction::CloseMutualArgs,
     math,
-    seeds::SEED_MARKET_NONCE,
+    seeds::{SEED_MARGIN, SEED_MARKET_NONCE},
     state::{
         intent_tree, BookMut, InstrumentConfig, IntentNode, MarginAccount, MarketNonceAccount,
         Pmlc, ProgramConfig, CLOSE_REASON_MUTUAL, NODE_TAG_INTENT, PMLC_STATUS_CLOSED, SIDE_LONG,
@@ -27,6 +27,25 @@ use crate::{
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
+
+fn validate_margin_pda(
+    program_id: &Pubkey,
+    margin_ai: &AccountInfo,
+    owner: &Pubkey,
+    collateral_mint: &Pubkey,
+) -> ProgramResult {
+    let bump = assert_pda(
+        &[SEED_MARGIN, owner.as_ref(), collateral_mint.as_ref()],
+        program_id,
+        margin_ai.key,
+    )?;
+    let data = margin_ai.try_borrow_data()?;
+    let m = MarginAccount::load(&data)?;
+    if m.owner != *owner || m.collateral_mint != *collateral_mint || m.bump != bump {
+        return Err(PolyleverageError::InvalidPda.into());
+    }
+    Ok(())
+}
 
 /// Accounts:
 ///   0. `[signer]` long_owner
@@ -83,10 +102,15 @@ pub fn process_close_mutual(
         }
         cfg.attestation_signer
     };
-    let (market_id, twap_window_slots, max_staleness_secs) = {
+    let (market_id, twap_window_slots, max_staleness_secs, collateral_mint) = {
         let data = instrument_ai.try_borrow_data()?;
         let inst = InstrumentConfig::load(&data)?;
-        (inst.market_id, inst.twap_window_slots, inst.max_staleness_secs)
+        (
+            inst.market_id,
+            inst.twap_window_slots,
+            inst.max_staleness_secs,
+            inst.collateral_mint,
+        )
     };
 
     // Verify CRE price attestation.
@@ -105,7 +129,11 @@ pub fn process_close_mutual(
     let now_unix = Clock::get()?.unix_timestamp.max(0) as u64;
 
     {
-        let _ = assert_pda(&[SEED_MARKET_NONCE, &market_id], program_id, market_nonce_ai.key)?;
+        let _ = assert_pda(
+            &[SEED_MARKET_NONCE, &market_id],
+            program_id,
+            market_nonce_ai.key,
+        )?;
         let mut data = market_nonce_ai.try_borrow_mut_data()?;
         let n = MarketNonceAccount::load_mut(&mut data)?;
         attestation::validate_freshness_and_nonce(
@@ -126,7 +154,10 @@ pub fn process_close_mutual(
         let data = pmlc_ai.try_borrow_data()?;
         let p = Pmlc::load(&data)?;
         p.require_live()?;
-        if p.market_id != market_id {
+        if p.instrument != *instrument_ai.key
+            || p.market_id != market_id
+            || p.collateral_mint != collateral_mint
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
         (
@@ -147,21 +178,13 @@ pub fn process_close_mutual(
     let two_c = collateral_per_side.saturating_mul(2);
     let eq_short = two_c.saturating_sub(eq_long);
 
-    // Validate margin accounts.
-    {
-        let data = long_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != *long_owner.key {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
-    {
-        let data = short_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != *short_owner.key {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
+    validate_margin_pda(program_id, long_margin_ai, long_owner.key, &collateral_mint)?;
+    validate_margin_pda(
+        program_id,
+        short_margin_ai,
+        short_owner.key,
+        &collateral_mint,
+    )?;
 
     // Apply settlement. No fees, no bounty — mutual.
     {
@@ -169,13 +192,17 @@ pub fn process_close_mutual(
         let lm = MarginAccount::load_mut(&mut ld)?;
         lm.debit_locked(collateral_per_side)?;
         lm.credit_free(eq_long)?;
-        lm.realized_pnl = lm.realized_pnl.saturating_add(eq_long as i64 - collateral_per_side as i64);
+        lm.realized_pnl = lm
+            .realized_pnl
+            .saturating_add(eq_long as i64 - collateral_per_side as i64);
 
         let mut sd = short_margin_ai.try_borrow_mut_data()?;
         let sm = MarginAccount::load_mut(&mut sd)?;
         sm.debit_locked(collateral_per_side)?;
         sm.credit_free(eq_short)?;
-        sm.realized_pnl = sm.realized_pnl.saturating_add(eq_short as i64 - collateral_per_side as i64);
+        sm.realized_pnl = sm
+            .realized_pnl
+            .saturating_add(eq_short as i64 - collateral_per_side as i64);
     }
 
     {
@@ -186,7 +213,12 @@ pub fn process_close_mutual(
         p.last_mark_slot = Clock::get()?.slot;
     }
 
-    msg!("close_mutual mark={} eq_long={} eq_short={}", mark_fp, eq_long, eq_short);
+    msg!(
+        "close_mutual mark={} eq_long={} eq_short={}",
+        mark_fp,
+        eq_long,
+        eq_short
+    );
     Ok(())
 }
 
@@ -204,10 +236,7 @@ pub fn process_close_mutual(
 ///       each expired intent's seat.trader to the caller-supplied margin accounts by
 ///       position. For v1 simplicity we require one margin account per pruned intent
 ///       (duplicates allowed if same owner has multiple expired).
-pub fn process_prune_expired(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+pub fn process_prune_expired(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let iter = &mut accounts.iter();
     let caller = next_account_info(iter)?;
     let instrument_ai = next_account_info(iter)?;
@@ -259,7 +288,7 @@ pub fn process_prune_expired(
             if node.contracts_remaining == 0 {
                 continue;
             }
-            if node.expiration_slot >= now {
+            if node.expiration_slot > now {
                 continue;
             }
             // Resolve owner via seat.
@@ -285,6 +314,11 @@ pub fn process_prune_expired(
             let data = m_ai.try_borrow_data()?;
             let m = MarginAccount::load(&data)?;
             if m.owner == *trader && m.collateral_mint == collateral_mint {
+                let _ = assert_pda(
+                    &[SEED_MARGIN, trader.as_ref(), collateral_mint.as_ref()],
+                    program_id,
+                    m_ai.key,
+                )?;
                 idx = Some(j);
                 break;
             }

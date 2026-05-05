@@ -14,12 +14,12 @@ use crate::{
     error::PolyleverageError,
     instruction::{CancelIntentArgs, PostIntentArgs},
     math,
-    processor::match_ix::{find_overlap_on_side, match_pair_core, MatchCtx},
+    processor::match_ix::{find_overlap_on_side, match_pair_core, FeeCtx, MatchCtx},
     seeds::{SEED_MARGIN, SEED_SESSION},
     state::{
         intent_tree, seat_tree, BookMut, InstrumentConfig, IntentNode, MarginAccount,
-        ProgramConfig, Session, INTENT_FLAG_REENTRY, NODE_TAG_INTENT, NULL_IDX, RB_RED,
-        SIDE_LONG, SIDE_SHORT,
+        ProgramConfig, Session, INTENT_FLAG_REENTRY, NODE_TAG_INTENT, NULL_IDX, RB_RED, SIDE_LONG,
+        SIDE_SHORT,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
@@ -45,7 +45,8 @@ pub(crate) fn fee_buffer_for(
 ///   2. `[]` instrument config
 ///   3. `[writable]` intent book
 ///   4. `[writable]` margin account PDA (owner, instrument.collateral_mint)
-///   5..7. (optional) inline-match extras: counterparty_margin, pmlc, system_program
+///   5..11. (optional) inline-match extras: counterparty_margin, pmlc, system_program,
+///          fee_schedule, taker_volume, maker_volume, fee_treasury
 pub fn process_post_intent(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -88,7 +89,8 @@ pub fn process_post_intent(
 ///   4. `[writable]` intent book
 ///   5. `[writable]` margin account PDA (session.owner, collateral_mint)
 ///   6. `[writable]` session PDA (seeds: [SEED_SESSION, session.owner])
-///   7..9. (optional) inline-match extras: counterparty_margin, pmlc, system_program
+///   7..13. (optional) inline-match extras: counterparty_margin, pmlc, system_program,
+///          fee_schedule, taker_volume, maker_volume, fee_treasury
 pub fn process_post_intent_delegated(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -214,7 +216,11 @@ fn do_post_intent_inner<'a, 'b>(
     // Validate margin PDA — derived from effective_owner (which is either
     // the direct signer or the session.owner in the delegated path).
     let margin_bump = assert_pda(
-        &[SEED_MARGIN, effective_owner.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            effective_owner.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         margin_ai.key,
     )?;
@@ -315,7 +321,11 @@ fn do_post_intent_inner<'a, 'b>(
                 let seat = book.seat_mut(seat_idx)?;
                 seat.active_intent_count =
                     seat.active_intent_count.saturating_sub(prune_len as u32);
-                msg!("prune_on_post pruned={} refund={}", prune_len, pruned_refund);
+                msg!(
+                    "prune_on_post pruned={} refund={}",
+                    prune_len,
+                    pruned_refund
+                );
             }
         }
     }
@@ -326,7 +336,10 @@ fn do_post_intent_inner<'a, 'b>(
     {
         let mut data = margin_ai.try_borrow_mut_data()?;
         let m = MarginAccount::load_mut(&mut data)?;
-        if m.owner != *effective_owner || m.collateral_mint != collateral_mint || m.bump != margin_bump {
+        if m.owner != *effective_owner
+            || m.collateral_mint != collateral_mint
+            || m.bump != margin_bump
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
         if pruned_refund > 0 {
@@ -388,74 +401,91 @@ fn do_post_intent_inner<'a, 'b>(
     // intent. If found, delegate to match_pair_core — which will match the pair,
     // settle collateral, and create the PMLC all within this same tx.
     //
-    // Required extra accounts (at indices 5, 6, 7 in `accounts`):
-    //   5. [writable] counterparty's margin account
-    //   6. [writable] new PMLC PDA
-    //   7. []         system program
+    // Required extra accounts for matching:
+    //   0. [writable] counterparty's margin account
+    //   1. [writable] new PMLC PDA
+    //   2. []         system program
+    //   3. []         fee schedule
+    //   4. [writable] taker UserVolume PDA
+    //   5. [writable] maker UserVolume PDA
+    //   6. [writable] fee treasury PDA
     //
     // Client pre-scans the book to predict the counterparty, derives the correct
     // counterparty margin PDA and the next PMLC PDA, and includes them here.
     // On mismatch (book moved between client scan and this ix), the inline match
     // fails silently — the post still succeeds. Client can then call
     // `MatchBestAvailable` in a follow-up tx.
-    if args.try_match != 0 && full_accounts.len() >= inline_match_offset + 3 {
-        let counterparty_margin_ai = &full_accounts[inline_match_offset];
-        let pmlc_ai = &full_accounts[inline_match_offset + 1];
-        let system_program_ai = &full_accounts[inline_match_offset + 2];
-
-        let now_slot = Clock::get()?.slot;
-        let opposite_side = if args.side == SIDE_LONG {
-            SIDE_SHORT
+    if args.try_match != 0 {
+        if full_accounts.len() < inline_match_offset + 7 {
+            msg!("inline match skipped: fee accounts required");
         } else {
-            SIDE_LONG
-        };
+            let counterparty_margin_ai = &full_accounts[inline_match_offset];
+            let pmlc_ai = &full_accounts[inline_match_offset + 1];
+            let system_program_ai = &full_accounts[inline_match_offset + 2];
+            let fee_schedule_ai = &full_accounts[inline_match_offset + 3];
+            let taker_volume_ai = &full_accounts[inline_match_offset + 4];
+            let maker_volume_ai = &full_accounts[inline_match_offset + 5];
+            let fee_treasury_ai = &full_accounts[inline_match_offset + 6];
 
-        // Scan for an overlapping counterparty intent.
-        let counterparty_id = {
-            let mut data = book_ai.try_borrow_mut_data()?;
-            let book = BookMut::load(&mut data)?;
-            find_overlap_on_side(
-                &book,
-                opposite_side,
-                args.min_price_fp,
-                args.max_price_fp,
-                now_slot,
-                intent_id,
-            )?
-        };
-
-        if let Some(cp_id) = counterparty_id {
-            // Build MatchCtx. Poster becomes either the long or short participant
-            // based on their side.
-            let (long_id, short_id, long_margin_ai, short_margin_ai) = if args.side == SIDE_LONG
-            {
-                (intent_id, cp_id, margin_ai, counterparty_margin_ai)
+            let now_slot = Clock::get()?.slot;
+            let opposite_side = if args.side == SIDE_LONG {
+                SIDE_SHORT
             } else {
-                (cp_id, intent_id, counterparty_margin_ai, margin_ai)
+                SIDE_LONG
             };
 
-            let ctx = MatchCtx {
-                payer,
-                instrument_ai,
-                book_ai,
-                long_margin_ai,
-                short_margin_ai,
-                pmlc_ai,
-                system_program: system_program_ai,
-                fee_ctx: None, // inline match is fee-free (post directly to avoid fees).
+            // Scan for an overlapping counterparty intent.
+            let counterparty_id = {
+                let mut data = book_ai.try_borrow_mut_data()?;
+                let book = BookMut::load(&mut data)?;
+                find_overlap_on_side(
+                    &book,
+                    opposite_side,
+                    args.min_price_fp,
+                    args.max_price_fp,
+                    now_slot,
+                    intent_id,
+                )?
             };
 
-            // V1: one contract per ix; caller can re-post for multi-contract fills.
-            match match_pair_core(program_id, &ctx, long_id, short_id, 1) {
-                Ok(()) => msg!("inline match ok: long={} short={}", long_id, short_id),
-                Err(err) => {
-                    // Post succeeded; match is best-effort. Log + swallow so the
-                    // post itself is preserved.
-                    msg!("inline match skipped: {:?}", err);
+            if let Some(cp_id) = counterparty_id {
+                // Build MatchCtx. Poster becomes either the long or short participant
+                // based on their side.
+                let (long_id, short_id, long_margin_ai, short_margin_ai) = if args.side == SIDE_LONG
+                {
+                    (intent_id, cp_id, margin_ai, counterparty_margin_ai)
+                } else {
+                    (cp_id, intent_id, counterparty_margin_ai, margin_ai)
+                };
+
+                let ctx = MatchCtx {
+                    payer,
+                    instrument_ai,
+                    book_ai,
+                    long_margin_ai,
+                    short_margin_ai,
+                    pmlc_ai,
+                    system_program: system_program_ai,
+                    fee_ctx: Some(FeeCtx {
+                        fee_schedule_ai,
+                        taker_volume_ai,
+                        maker_volume_ai,
+                        fee_treasury_ai,
+                    }),
+                };
+
+                // V1: one contract per ix; caller can re-post for multi-contract fills.
+                match match_pair_core(program_id, &ctx, long_id, short_id, 1) {
+                    Ok(()) => msg!("inline match ok: long={} short={}", long_id, short_id),
+                    Err(err) => {
+                        // Post succeeded; match is best-effort. Log + swallow so the
+                        // post itself is preserved.
+                        msg!("inline match skipped: {:?}", err);
+                    }
                 }
+            } else {
+                msg!("inline match skipped: no overlapping counterparty");
             }
-        } else {
-            msg!("inline match skipped: no overlapping counterparty");
         }
     }
 
@@ -537,7 +567,11 @@ pub fn process_cancel_intent(
 
     // Margin PDA always derives from the original owner — refund flows to them.
     let margin_bump = assert_pda(
-        &[SEED_MARGIN, original_owner.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            original_owner.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         margin_ai.key,
     )?;
@@ -555,8 +589,7 @@ pub fn process_cancel_intent(
     drop(book_data);
     let mut data = margin_ai.try_borrow_mut_data()?;
     let m = MarginAccount::load_mut(&mut data)?;
-    if m.owner != original_owner || m.collateral_mint != collateral_mint || m.bump != margin_bump
-    {
+    if m.owner != original_owner || m.collateral_mint != collateral_mint || m.bump != margin_bump {
         return Err(PolyleverageError::InvalidPda.into());
     }
     m.move_reserved_to_free(total)?;
@@ -660,7 +693,11 @@ pub fn process_cancel_intent_delegated(
 
     // Margin PDA is for the original owner (= session.owner).
     let margin_bump = assert_pda(
-        &[SEED_MARGIN, original_owner.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            original_owner.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         margin_ai.key,
     )?;
@@ -676,8 +713,7 @@ pub fn process_cancel_intent_delegated(
     drop(book_data);
     let mut data = margin_ai.try_borrow_mut_data()?;
     let m = MarginAccount::load_mut(&mut data)?;
-    if m.owner != original_owner || m.collateral_mint != collateral_mint || m.bump != margin_bump
-    {
+    if m.owner != original_owner || m.collateral_mint != collateral_mint || m.bump != margin_bump {
         return Err(PolyleverageError::InvalidPda.into());
     }
     m.move_reserved_to_free(total)?;

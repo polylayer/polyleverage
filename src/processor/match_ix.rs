@@ -30,7 +30,7 @@ use crate::{
     error::PolyleverageError,
     instruction::{MatchBestArgs, MatchPairArgs},
     math,
-    seeds::{SEED_PMLC, SEED_USER_VOLUME},
+    seeds::{SEED_FEE_SCHEDULE, SEED_MARGIN, SEED_PMLC, SEED_USER_VOLUME},
     state::{
         intent_tree, BookMut, InstrumentConfig, IntentNode, MarginAccount, Pmlc, UserVolume,
         DISC_PMLC, INTENT_FLAG_REENTRY, NODE_TAG_INTENT, PMLC_FLAG_LONG_REENTRY,
@@ -40,8 +40,7 @@ use crate::{
     utils::{assert_pda, assert_signer, assert_writable},
 };
 
-/// Lazy-init a UserVolume PDA if absent. Matches the pattern used by
-/// `ensure_fee_treasury`.
+/// Validate or lazy-init a UserVolume PDA.
 fn ensure_user_volume<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
@@ -51,14 +50,22 @@ fn ensure_user_volume<'info>(
     system_program: &AccountInfo<'info>,
     now_slot: u64,
 ) -> ProgramResult {
-    if volume_ai.data_len() != 0 {
-        return Ok(());
-    }
     let bump = assert_pda(
         &[SEED_USER_VOLUME, owner.as_ref(), mint.as_ref()],
         program_id,
         volume_ai.key,
     )?;
+    if volume_ai.data_len() != 0 {
+        if volume_ai.owner != program_id {
+            return Err(PolyleverageError::InvalidAccountOwner.into());
+        }
+        let data = volume_ai.try_borrow_data()?;
+        let volume = UserVolume::load(&data)?;
+        if volume.owner != *owner || volume.collateral_mint != *mint || volume.bump != bump {
+            return Err(PolyleverageError::InvalidPda.into());
+        }
+        return Ok(());
+    }
     let rent = Rent::get()?;
     invoke_signed(
         &solana_program::system_instruction::create_account(
@@ -74,6 +81,24 @@ fn ensure_user_volume<'info>(
     let mut data = volume_ai.try_borrow_mut_data()?;
     UserVolume::init(&mut data, *owner, *mint, now_slot, bump)?;
     Ok(())
+}
+
+pub(crate) fn release_fee_buffer_for_fill(
+    fee_buffer: u64,
+    contracts_remaining_before: u16,
+    fill_contracts: u16,
+) -> Result<u64, ProgramError> {
+    if fill_contracts == 0
+        || contracts_remaining_before == 0
+        || fill_contracts > contracts_remaining_before
+    {
+        return Err(PolyleverageError::InvalidContractCount.into());
+    }
+    if fill_contracts == contracts_remaining_before {
+        return Ok(fee_buffer);
+    }
+    u64::try_from(fee_buffer as u128 * fill_contracts as u128 / contracts_remaining_before as u128)
+        .map_err(|_| PolyleverageError::ArithmeticOverflow.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +169,7 @@ pub struct MatchCtx<'a, 'info> {
     pub short_margin_ai: &'a AccountInfo<'info>,
     pub pmlc_ai: &'a AccountInfo<'info>,
     pub system_program: &'a AccountInfo<'info>,
-    /// Optional fee context. When `Some`, the taker is charged the
-    /// tier-derived fee; when `None`, no fee applies (0 bps).
+    /// Fee context used to charge the taker and update both users' volumes.
     pub fee_ctx: Option<FeeCtx<'a, 'info>>,
 }
 
@@ -190,22 +214,26 @@ fn unpack_accounts<'a, 'info>(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Optional fee accounts: fee_schedule, taker_volume, maker_volume, fee_treasury.
-    // Presence is detected by accounts length ≥ 11 (7 base + 4 fee).
-    let fee_ctx = if accounts.len() >= 11 {
-        let fee_schedule_ai = next_account_info(iter)?;
-        let taker_volume_ai = next_account_info(iter)?;
-        let maker_volume_ai = next_account_info(iter)?;
-        let fee_treasury_ai = next_account_info(iter)?;
-        Some(FeeCtx {
-            fee_schedule_ai,
-            taker_volume_ai,
-            maker_volume_ai,
-            fee_treasury_ai,
-        })
-    } else {
-        None
-    };
+    if accounts.len() < 11 {
+        return Err(PolyleverageError::FeeAccountsRequired.into());
+    }
+    let fee_schedule_ai = next_account_info(iter)?;
+    let taker_volume_ai = next_account_info(iter)?;
+    let maker_volume_ai = next_account_info(iter)?;
+    let fee_treasury_ai = next_account_info(iter)?;
+    assert_writable(taker_volume_ai)?;
+    assert_writable(maker_volume_ai)?;
+    assert_writable(fee_treasury_ai)?;
+    if fee_schedule_ai.owner != program_id {
+        return Err(PolyleverageError::InvalidAccountOwner.into());
+    }
+    assert_pda(&[SEED_FEE_SCHEDULE], program_id, fee_schedule_ai.key)?;
+    let fee_ctx = Some(FeeCtx {
+        fee_schedule_ai,
+        taker_volume_ai,
+        maker_volume_ai,
+        fee_treasury_ai,
+    });
 
     Ok(MatchCtx {
         payer,
@@ -394,6 +422,8 @@ pub fn match_pair_core(
         let per_contract_reserve = collateral_bucket;
         let mut long = long;
         let mut short = short;
+        let long_remaining_before = long.contracts_remaining;
+        let short_remaining_before = short.contracts_remaining;
         long.contracts_remaining -= n_in_this_ix;
         short.contracts_remaining -= n_in_this_ix;
         long.reserved_collateral = long
@@ -405,14 +435,24 @@ pub fn match_pair_core(
             .checked_sub(per_contract_reserve * n_in_this_ix as u64)
             .ok_or(PolyleverageError::InsufficientReservedCollateral)?;
 
-        let per_contract_fee_buf_long = long.fee_buffer / long.contracts_total.max(1) as u64;
-        let per_contract_fee_buf_short = short.fee_buffer / short.contracts_total.max(1) as u64;
+        let fee_buf_release_long = if long_remaining_before == n_in_this_ix {
+            long.fee_buffer
+        } else {
+            release_fee_buffer_for_fill(long.fee_buffer, long_remaining_before, n_in_this_ix)?
+        };
+        let fee_buf_release_short = if short_remaining_before == n_in_this_ix {
+            short.fee_buffer
+        } else {
+            release_fee_buffer_for_fill(short.fee_buffer, short_remaining_before, n_in_this_ix)?
+        };
         long.fee_buffer = long
             .fee_buffer
-            .saturating_sub(per_contract_fee_buf_long * n_in_this_ix as u64);
+            .checked_sub(fee_buf_release_long)
+            .ok_or(PolyleverageError::ArithmeticUnderflow)?;
         short.fee_buffer = short
             .fee_buffer
-            .saturating_sub(per_contract_fee_buf_short * n_in_this_ix as u64);
+            .checked_sub(fee_buf_release_short)
+            .ok_or(PolyleverageError::ArithmeticUnderflow)?;
 
         *book.intent_mut(long_idx)? = long;
         *book.intent_mut(short_idx)? = short;
@@ -441,8 +481,8 @@ pub fn match_pair_core(
                 short_trader,
                 entry_fp,
                 n_contracts: n_in_this_ix,
-                per_contract_fee_buf_long,
-                per_contract_fee_buf_short,
+                fee_buf_release_long,
+                fee_buf_release_short,
                 taker_is_long,
                 long_reentry: (long.flags & INTENT_FLAG_REENTRY) != 0,
                 short_reentry: (short.flags & INTENT_FLAG_REENTRY) != 0,
@@ -456,16 +496,40 @@ pub fn match_pair_core(
 
     // --- Validate margin accounts ---
     {
+        let bump = assert_pda(
+            &[
+                SEED_MARGIN,
+                match_result.long_trader.as_ref(),
+                collateral_mint.as_ref(),
+            ],
+            program_id,
+            ctx.long_margin_ai.key,
+        )?;
         let data = ctx.long_margin_ai.try_borrow_data()?;
         let m = MarginAccount::load(&data)?;
-        if m.owner != match_result.long_trader || m.collateral_mint != collateral_mint {
+        if m.owner != match_result.long_trader
+            || m.collateral_mint != collateral_mint
+            || m.bump != bump
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
     }
     {
+        let bump = assert_pda(
+            &[
+                SEED_MARGIN,
+                match_result.short_trader.as_ref(),
+                collateral_mint.as_ref(),
+            ],
+            program_id,
+            ctx.short_margin_ai.key,
+        )?;
         let data = ctx.short_margin_ai.try_borrow_data()?;
         let m = MarginAccount::load(&data)?;
-        if m.owner != match_result.short_trader || m.collateral_mint != collateral_mint {
+        if m.owner != match_result.short_trader
+            || m.collateral_mint != collateral_mint
+            || m.bump != bump
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
     }
@@ -474,8 +538,11 @@ pub fn match_pair_core(
     let now_slot = Clock::get()?.slot;
 
     // Compute the taker's fee by looking up their tier. Requires FeeCtx.
-    // When no fee_ctx is passed (e.g. inline match in PostIntent), fee = 0.
-    let taker_fee_atoms: u64 = if let Some(fc) = &ctx.fee_ctx {
+    let fc = ctx
+        .fee_ctx
+        .as_ref()
+        .ok_or(PolyleverageError::FeeAccountsRequired)?;
+    let taker_fee_atoms: u64 = {
         // Ensure fee treasury exists (lazy init by whoever is paying rent).
         crate::processor::fees::ensure_fee_treasury(
             program_id,
@@ -524,8 +591,8 @@ pub fn match_pair_core(
             let v30 = vol.effective_30d_volume(now_slot);
             sched.fee_for_volume(v30)
         };
-        let fee_atoms = (per_side_collateral as u128 * fee_bps as u128
-            / math::BPS_DENOM as u128) as u64;
+        let fee_atoms =
+            (per_side_collateral as u128 * fee_bps as u128 / math::BPS_DENOM as u128) as u64;
 
         // Update volumes (both sides get credited for the matched notional).
         {
@@ -545,14 +612,10 @@ pub fn match_pair_core(
             treasury.accrue(fee_atoms)?;
         }
         fee_atoms
-    } else {
-        0
     };
 
-    let fee_buf_long_total =
-        match_result.per_contract_fee_buf_long * match_result.n_contracts as u64;
-    let fee_buf_short_total =
-        match_result.per_contract_fee_buf_short * match_result.n_contracts as u64;
+    let fee_buf_long_total = match_result.fee_buf_release_long;
+    let fee_buf_short_total = match_result.fee_buf_release_short;
 
     {
         let mut data = ctx.long_margin_ai.try_borrow_mut_data()?;
@@ -659,8 +722,8 @@ struct MatchResult {
     short_trader: Pubkey,
     entry_fp: u64,
     n_contracts: u16,
-    per_contract_fee_buf_long: u64,
-    per_contract_fee_buf_short: u64,
+    fee_buf_release_long: u64,
+    fee_buf_release_short: u64,
     taker_is_long: bool,
     long_reentry: bool,
     short_reentry: bool,
@@ -681,4 +744,33 @@ fn find_intent_by_id(book: &BookMut, id: u64) -> Result<(u32, u8), ProgramError>
         }
     }
     Err(PolyleverageError::IntentNotFound.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fee_buffer_release_spreads_remaining_buffer() {
+        assert_eq!(release_fee_buffer_for_fill(101, 3, 1).unwrap(), 33);
+        assert_eq!(release_fee_buffer_for_fill(68, 2, 1).unwrap(), 34);
+    }
+
+    #[test]
+    fn fee_buffer_release_final_fill_releases_dust() {
+        assert_eq!(release_fee_buffer_for_fill(34, 1, 1).unwrap(), 34);
+        assert_eq!(release_fee_buffer_for_fill(2, 1, 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn fee_buffer_release_rejects_impossible_fill() {
+        assert!(matches!(
+            release_fee_buffer_for_fill(10, 0, 1),
+            Err(ProgramError::Custom(code)) if code == PolyleverageError::InvalidContractCount as u32
+        ));
+        assert!(matches!(
+            release_fee_buffer_for_fill(10, 1, 2),
+            Err(ProgramError::Custom(code)) if code == PolyleverageError::InvalidContractCount as u32
+        ));
+    }
 }

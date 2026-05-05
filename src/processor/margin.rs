@@ -21,6 +21,27 @@ use crate::{
     utils::{assert_pda, assert_signer, assert_writable},
 };
 
+fn validate_vault_token_account_data(
+    vault_key: &Pubkey,
+    vault_authority: &Pubkey,
+    mint: &Pubkey,
+    token_data: &[u8],
+) -> ProgramResult {
+    let expected_vault_ata =
+        spl_associated_token_account::get_associated_token_address(vault_authority, mint);
+    if *vault_key != expected_vault_ata {
+        return Err(PolyleverageError::InvalidVault.into());
+    }
+    let token = spl_token::state::Account::unpack_from_slice(token_data)?;
+    if token.owner != *vault_authority {
+        return Err(PolyleverageError::InvalidTokenAccountOwner.into());
+    }
+    if token.mint != *mint {
+        return Err(PolyleverageError::InvalidMint.into());
+    }
+    Ok(())
+}
+
 /// Accounts:
 ///   0. `[writable, signer]` owner
 ///   1. `[writable]` margin account PDA (seeds `[SEED_MARGIN, owner, mint]`)
@@ -124,6 +145,14 @@ pub fn process_deposit(
         }
     }
 
+    // Validate the deposit destination is the canonical protocol vault ATA.
+    let (vault_authority, _) =
+        Pubkey::find_program_address(&[SEED_VAULT, mint.key.as_ref()], program_id);
+    {
+        let data = vault_ata.try_borrow_data()?;
+        validate_vault_token_account_data(vault_ata.key, &vault_authority, mint.key, &data)?;
+    }
+
     // CPI: transfer from user ATA to collateral vault.
     let ix = spl_token::instruction::transfer(
         token_program.key,
@@ -201,13 +230,7 @@ pub fn process_withdraw(
     // Validate vault ATA owner is our vault_authority PDA (prevents passing in a random token account).
     {
         let data = vault_ata.try_borrow_data()?;
-        let token = spl_token::state::Account::unpack_from_slice(&data)?;
-        if token.owner != *vault_authority.key {
-            return Err(PolyleverageError::InvalidTokenAccountOwner.into());
-        }
-        if token.mint != *mint.key {
-            return Err(PolyleverageError::InvalidMint.into());
-        }
+        validate_vault_token_account_data(vault_ata.key, vault_authority.key, mint.key, &data)?;
     }
 
     // Update ledger first; if CPI fails, runtime reverts anyway.
@@ -241,4 +264,76 @@ pub fn process_withdraw(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_program::program_option::COption;
+    use spl_token::state::AccountState;
+
+    fn packed_token_account(owner: Pubkey, mint: Pubkey) -> Vec<u8> {
+        let account = spl_token::state::Account {
+            mint,
+            owner,
+            amount: 0,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        };
+        let mut data = vec![0u8; spl_token::state::Account::LEN];
+        spl_token::state::Account::pack(account, &mut data).unwrap();
+        data
+    }
+
+    #[test]
+    fn vault_validation_accepts_canonical_protocol_ata() {
+        let program_id = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let (vault_authority, _) =
+            Pubkey::find_program_address(&[SEED_VAULT, mint.as_ref()], &program_id);
+        let vault_ata =
+            spl_associated_token_account::get_associated_token_address(&vault_authority, &mint);
+        let data = packed_token_account(vault_authority, mint);
+
+        validate_vault_token_account_data(&vault_ata, &vault_authority, &mint, &data).unwrap();
+    }
+
+    #[test]
+    fn vault_validation_rejects_noncanonical_destination() {
+        let program_id = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let (vault_authority, _) =
+            Pubkey::find_program_address(&[SEED_VAULT, mint.as_ref()], &program_id);
+        let data = packed_token_account(vault_authority, mint);
+
+        assert!(matches!(
+            validate_vault_token_account_data(
+                &Pubkey::new_unique(),
+                &vault_authority,
+                &mint,
+                &data,
+            ),
+            Err(ProgramError::Custom(code)) if code == PolyleverageError::InvalidVault as u32
+        ));
+    }
+
+    #[test]
+    fn vault_validation_rejects_user_owned_destination() {
+        let program_id = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let (vault_authority, _) =
+            Pubkey::find_program_address(&[SEED_VAULT, mint.as_ref()], &program_id);
+        let vault_ata =
+            spl_associated_token_account::get_associated_token_address(&vault_authority, &mint);
+        let data = packed_token_account(Pubkey::new_unique(), mint);
+
+        assert!(matches!(
+            validate_vault_token_account_data(&vault_ata, &vault_authority, &mint, &data),
+            Err(ProgramError::Custom(code))
+                if code == PolyleverageError::InvalidTokenAccountOwner as u32
+        ));
+    }
 }

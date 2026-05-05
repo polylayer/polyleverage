@@ -21,20 +21,37 @@ use solana_program::{
 };
 
 use crate::{
-    attestation::{
-        self, Attestation, ATT_TYPE_HISTORICAL_LIQUIDATION, ATT_TYPE_RESOLUTION,
-    },
+    attestation::{self, Attestation, ATT_TYPE_HISTORICAL_LIQUIDATION, ATT_TYPE_RESOLUTION},
     error::PolyleverageError,
     instruction::{LiquidateArgs, ResolveArgs},
     math,
     seeds::{SEED_MARGIN, SEED_MARKET_NONCE},
     state::{
         InstrumentConfig, MarginAccount, MarketNonceAccount, Pmlc, ProgramConfig,
-        CLOSE_REASON_LIQUIDATED, CLOSE_REASON_RESOLVED,
-        PMLC_STATUS_LIQUIDATED, PMLC_STATUS_RESOLVED,
+        CLOSE_REASON_LIQUIDATED, CLOSE_REASON_RESOLVED, PMLC_STATUS_LIQUIDATED,
+        PMLC_STATUS_RESOLVED,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
+
+fn validate_margin_pda(
+    program_id: &Pubkey,
+    margin_ai: &AccountInfo,
+    owner: &Pubkey,
+    collateral_mint: &Pubkey,
+) -> ProgramResult {
+    let bump = assert_pda(
+        &[SEED_MARGIN, owner.as_ref(), collateral_mint.as_ref()],
+        program_id,
+        margin_ai.key,
+    )?;
+    let data = margin_ai.try_borrow_data()?;
+    let m = MarginAccount::load(&data)?;
+    if m.owner != *owner || m.collateral_mint != *collateral_mint || m.bump != bump {
+        return Err(PolyleverageError::InvalidPda.into());
+    }
+    Ok(())
+}
 
 /// Accounts:
 ///   0. `[signer, writable]` keeper (receives bounty via keeper_margin)
@@ -96,13 +113,7 @@ pub fn process_liquidate(
     // Snapshot instrument config (twap_window_slots no longer needed on-chain
     // for liquidation — the TEE attestor uses it off-chain to query Polymarket
     // history at the right granularity, and we trust the result).
-    let (
-        market_id,
-        liquidation_bps,
-        liquidation_bounty_bps,
-        max_staleness_secs,
-        collateral_mint,
-    ) = {
+    let (market_id, liquidation_bps, liquidation_bounty_bps, max_staleness_secs, collateral_mint) = {
         let data = instrument_ai.try_borrow_data()?;
         let inst = InstrumentConfig::load(&data)?;
         (
@@ -116,18 +127,7 @@ pub fn process_liquidate(
 
     // Keeper margin must be the PDA for (keeper, collateral_mint). This is where
     // the liquidation bounty is credited.
-    let _keeper_margin_bump = assert_pda(
-        &[SEED_MARGIN, keeper.key.as_ref(), collateral_mint.as_ref()],
-        program_id,
-        keeper_margin_ai.key,
-    )?;
-    {
-        let data = keeper_margin_ai.try_borrow_data()?;
-        let km = MarginAccount::load(&data)?;
-        if km.owner != *keeper.key || km.collateral_mint != collateral_mint {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
+    validate_margin_pda(program_id, keeper_margin_ai, keeper.key, &collateral_mint)?;
 
     // Verify the wrapping signature came from the registered attestor.
     let attestation_bytes = attestation::verify_via_ed25519_sysvar(
@@ -156,8 +156,11 @@ pub fn process_liquidate(
     // SIGNED recently even if the breach itself is historical). This is what
     // bounds replay of an old signed attestation.
     {
-        let expected_bump =
-            assert_pda(&[SEED_MARKET_NONCE, &market_id], program_id, market_nonce_ai.key)?;
+        let expected_bump = assert_pda(
+            &[SEED_MARKET_NONCE, &market_id],
+            program_id,
+            market_nonce_ai.key,
+        )?;
         let _ = expected_bump;
         let mut data = market_nonce_ai.try_borrow_mut_data()?;
         let n = MarketNonceAccount::load_mut(&mut data)?;
@@ -181,7 +184,10 @@ pub fn process_liquidate(
         let data = pmlc_ai.try_borrow_data()?;
         let p = Pmlc::load(&data)?;
         p.require_live()?;
-        if p.market_id != market_id {
+        if p.instrument != *instrument_ai.key
+            || p.market_id != market_id
+            || p.collateral_mint != collateral_mint
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
         (
@@ -201,7 +207,8 @@ pub fn process_liquidate(
     let eq_short = two_c.saturating_sub(eq_long);
 
     // Liquidation threshold (bounded-win: threshold == 0 → only fires on exact 0 equity).
-    let threshold = (collateral_per_side as u128 * liquidation_bps as u128 / math::BPS_DENOM as u128) as u64;
+    let threshold =
+        (collateral_per_side as u128 * liquidation_bps as u128 / math::BPS_DENOM as u128) as u64;
     let min_equity = eq_long.min(eq_short);
     if min_equity > threshold {
         return Err(PolyleverageError::NotLiquidatable.into());
@@ -209,23 +216,11 @@ pub fn process_liquidate(
 
     // Determine winner/loser. Bounded-win: winner gets 2c - bounty - fee; loser gets 0.
     let long_wins = eq_long > eq_short;
-    let bounty = (collateral_per_side as u128 * liquidation_bounty_bps as u128 / math::BPS_DENOM as u128) as u64;
+    let bounty = (collateral_per_side as u128 * liquidation_bounty_bps as u128
+        / math::BPS_DENOM as u128) as u64;
 
-    // Validate margin PDAs match PMLC owners.
-    {
-        let data = long_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != long_owner {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
-    {
-        let data = short_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != short_owner {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
+    validate_margin_pda(program_id, long_margin_ai, &long_owner, &collateral_mint)?;
+    validate_margin_pda(program_id, short_margin_ai, &short_owner, &collateral_mint)?;
 
     // Apply collateral movement.
     {
@@ -336,10 +331,14 @@ pub fn process_resolve(
         (cfg.attestation_signer, cfg.default_max_staleness_secs)
     };
 
-    let (market_id, max_staleness_secs) = {
+    let (market_id, max_staleness_secs, collateral_mint) = {
         let data = instrument_ai.try_borrow_data()?;
         let inst = InstrumentConfig::load(&data)?;
-        (inst.market_id, inst.max_staleness_secs)
+        (
+            inst.market_id,
+            inst.max_staleness_secs,
+            inst.collateral_mint,
+        )
     };
 
     // Verify attestation.
@@ -355,6 +354,11 @@ pub fn process_resolve(
 
     let now_unix = Clock::get()?.unix_timestamp.max(0) as u64;
     {
+        let _ = assert_pda(
+            &[SEED_MARKET_NONCE, &market_id],
+            program_id,
+            market_nonce_ai.key,
+        )?;
         let mut data = market_nonce_ai.try_borrow_mut_data()?;
         let n = MarketNonceAccount::load_mut(&mut data)?;
         attestation::validate_freshness_and_nonce(
@@ -383,7 +387,10 @@ pub fn process_resolve(
         let data = pmlc_ai.try_borrow_data()?;
         let p = Pmlc::load(&data)?;
         p.require_live()?;
-        if p.market_id != market_id {
+        if p.instrument != *instrument_ai.key
+            || p.market_id != market_id
+            || p.collateral_mint != collateral_mint
+        {
             return Err(PolyleverageError::InvalidPda.into());
         }
         (
@@ -410,21 +417,8 @@ pub fn process_resolve(
     let two_c = collateral_per_side.saturating_mul(2);
     let eq_short = two_c.saturating_sub(eq_long);
 
-    // Validate margin accounts.
-    {
-        let data = long_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != long_owner {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
-    {
-        let data = short_margin_ai.try_borrow_data()?;
-        let m = MarginAccount::load(&data)?;
-        if m.owner != short_owner {
-            return Err(PolyleverageError::InvalidPda.into());
-        }
-    }
+    validate_margin_pda(program_id, long_margin_ai, &long_owner, &collateral_mint)?;
+    validate_margin_pda(program_id, short_margin_ai, &short_owner, &collateral_mint)?;
 
     // Apply.
     {

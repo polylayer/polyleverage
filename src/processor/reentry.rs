@@ -109,7 +109,14 @@ pub fn process_claim_reentry(
             // Reentry flag was never set for this side, or already consumed.
             return Err(PolyleverageError::InvalidPmlcSide.into());
         }
-        (expected_owner, range.0, range.1, mask, p.instrument, p.collateral_mint)
+        (
+            expected_owner,
+            range.0,
+            range.1,
+            mask,
+            p.instrument,
+            p.collateral_mint,
+        )
     };
     if required_owner != *owner.key {
         return Err(PolyleverageError::MissingSigner.into());
@@ -126,7 +133,12 @@ pub fn process_claim_reentry(
         if inst.collateral_mint != collateral_mint {
             return Err(PolyleverageError::InvalidPda.into());
         }
-        (inst.intent_book, inst.leverage_bps, inst.collateral_bucket, inst.tick_fp)
+        (
+            inst.intent_book,
+            inst.leverage_bps,
+            inst.collateral_bucket,
+            inst.tick_fp,
+        )
     };
     let _ = leverage_bps;
     if book_key != *book_ai.key {
@@ -163,9 +175,9 @@ pub fn process_claim_reentry(
         msg!("claim_reentry: insufficient free for any contract; flag cleared");
         return Ok(());
     }
-    let new_contracts: u16 = new_contracts_u64.min(u16::MAX as u64) as u16;
+    let mut new_contracts: u16 = new_contracts_u64.min(u16::MAX as u64) as u16;
 
-    let collateral_reserve = (new_contracts as u64)
+    let mut collateral_reserve = (new_contracts as u64)
         .checked_mul(collateral_bucket)
         .ok_or(PolyleverageError::ArithmeticOverflow)?;
 
@@ -175,8 +187,8 @@ pub fn process_claim_reentry(
         let book = crate::state::BookRef::load(&data)?;
         book.header.cached_max_fee_bps
     };
-    let fee_buffer = fee_buffer_for(new_contracts, collateral_bucket, max_fee_bps)?;
-    let total_reserve = collateral_reserve
+    let mut fee_buffer = fee_buffer_for(new_contracts, collateral_bucket, max_fee_bps)?;
+    let mut total_reserve = collateral_reserve
         .checked_add(fee_buffer)
         .ok_or(PolyleverageError::ArithmeticOverflow)?;
 
@@ -200,8 +212,14 @@ pub fn process_claim_reentry(
             msg!("claim_reentry: fee buffer exceeded free; flag cleared");
             return Ok(());
         }
-        // continue with n
-        let _ = n;
+        new_contracts = n;
+        collateral_reserve = (new_contracts as u64)
+            .checked_mul(collateral_bucket)
+            .ok_or(PolyleverageError::ArithmeticOverflow)?;
+        fee_buffer = fee_buffer_for(new_contracts, collateral_bucket, max_fee_bps)?;
+        total_reserve = collateral_reserve
+            .checked_add(fee_buffer)
+            .ok_or(PolyleverageError::ArithmeticOverflow)?;
     }
 
     // --- Reserve + allocate intent node + insert into tree ---
@@ -260,6 +278,10 @@ pub fn process_claim_reentry(
         p.flags &= !reentry_flag_mask;
     }
 
-    msg!("claim_reentry ok contracts={} intent_id={}", new_contracts, intent_id);
+    msg!(
+        "claim_reentry ok contracts={} intent_id={}",
+        new_contracts,
+        intent_id
+    );
     Ok(())
 }
