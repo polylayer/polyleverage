@@ -18,13 +18,9 @@ use solana_program::{
 
 use crate::{
     error::PolyleverageError,
-    instruction::{
-        InitBucketRegistryArgs, InitStablecoinRegistryArgs, SetBucketRegistryArgs,
-    },
+    instruction::{InitBucketRegistryArgs, InitStablecoinRegistryArgs, SetBucketRegistryArgs},
     processor::multisig::authorize_admin_or_multisig,
-    seeds::{
-        SEED_BUCKET_REGISTRY, SEED_STABLECOIN_REGISTRY, SEED_WUSD_AUTHORITY, SEED_WUSD_MINT,
-    },
+    seeds::{SEED_BUCKET_REGISTRY, SEED_STABLECOIN_REGISTRY, SEED_WUSD_AUTHORITY, SEED_WUSD_MINT},
     state::{
         BucketRegistry, ProgramConfig, StablecoinRegistry, BUCKET_REGISTRY_LEN,
         DEFAULT_COLLATERAL_BUCKETS, DEFAULT_LEVERAGE_BPS, STABLECOIN_REGISTRY_LEN,
@@ -229,7 +225,11 @@ pub fn process_init_stablecoin_registry(
         )?;
         solana_program::program::invoke(
             &init_mint_ix,
-            &[wusd_mint_ai.clone(), token_program.clone(), rent_sysvar.clone()],
+            &[
+                wusd_mint_ai.clone(),
+                token_program.clone(),
+                rent_sysvar.clone(),
+            ],
         )?;
     }
 
@@ -258,10 +258,7 @@ pub fn process_init_stablecoin_registry(
 ///   1. `[writable]` stablecoin_registry
 ///   2. `[]` new stablecoin mint (SPL mint)
 ///   (plus admin signer / multisig)
-pub fn process_add_stablecoin_mint(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+pub fn process_add_stablecoin_mint(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let iter = &mut accounts.iter();
     let config_ai = next_account_info(iter)?;
     let registry_ai = next_account_info(iter)?;

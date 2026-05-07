@@ -7,12 +7,7 @@
 //!
 //! Node index `0` is reserved as a null sentinel; valid nodes live at indices `1..=node_count`.
 
-use crate::{
-    const_assert_size,
-    error::PolyleverageError,
-    pod,
-    seeds::SEED_BOOK,
-};
+use crate::{const_assert_size, error::PolyleverageError, pod, seeds::SEED_BOOK};
 use bytemuck::{Pod, Zeroable};
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 

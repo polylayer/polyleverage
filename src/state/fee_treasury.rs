@@ -46,11 +46,7 @@ impl FeeTreasury {
         Ok(t)
     }
 
-    pub fn init(
-        bytes: &mut [u8],
-        collateral_mint: Pubkey,
-        bump: u8,
-    ) -> Result<(), ProgramError> {
+    pub fn init(bytes: &mut [u8], collateral_mint: Pubkey, bump: u8) -> Result<(), ProgramError> {
         let t: &mut Self = pod::try_cast_mut(bytes)?;
         if t.discriminator != 0 {
             return Err(PolyleverageError::AlreadyInitialized.into());

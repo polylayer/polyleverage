@@ -16,7 +16,7 @@ use crate::{
     processor::multisig::authorize_admin_or_multisig,
     seeds::SEED_CONFIG,
     state::{ProgramConfig, PROGRAM_CONFIG_LEN},
-    utils::{assert_pda, assert_writable, assert_signer},
+    utils::{assert_pda, assert_signer, assert_writable},
 };
 
 /// Accounts:

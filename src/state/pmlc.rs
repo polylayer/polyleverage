@@ -65,16 +65,31 @@ pub struct Pmlc {
     pub _reserved: [u8; 32],
 }
 
-pub const PMLC_LEN: usize =
-    1 + 1 + 1 + 1 + 1 + 3
+pub const PMLC_LEN: usize = 1
+    + 1
+    + 1
+    + 1
+    + 1
+    + 3
     + 8
-    + 32 + 32 + 32
-    + 32 + 32
-    + 8 + 4 + 4
-    + 8 + 8
-    + 8 + 8
-    + 8 + 8
-    + 8 + 8 + 8 + 8
+    + 32
+    + 32
+    + 32
+    + 32
+    + 32
+    + 8
+    + 4
+    + 4
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
+    + 8
     + 32;
 const_assert_size!(Pmlc, PMLC_LEN);
 

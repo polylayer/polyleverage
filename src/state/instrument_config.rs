@@ -2,12 +2,7 @@
 //!
 //! Spec §1.4 / §22.
 
-use crate::{
-    const_assert_size,
-    error::PolyleverageError,
-    pod,
-    seeds::SEED_INSTRUMENT,
-};
+use crate::{const_assert_size, error::PolyleverageError, pod, seeds::SEED_INSTRUMENT};
 use bytemuck::{Pod, Zeroable};
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 
@@ -90,12 +85,7 @@ pub struct InstrumentConfig {
 }
 
 pub const INSTRUMENT_CONFIG_LEN: usize =
-    1 + 1 + 1 + 1 + 4
-    + 32 + 32 + 32
-    + 32 + 32
-    + 4 + 4 + 8
-    + 8 + 8 + 4 + 2 + 2 + 8
-    + 48;
+    1 + 1 + 1 + 1 + 4 + 32 + 32 + 32 + 32 + 32 + 4 + 4 + 8 + 8 + 8 + 4 + 2 + 2 + 8 + 48;
 const_assert_size!(InstrumentConfig, INSTRUMENT_CONFIG_LEN);
 
 impl InstrumentConfig {

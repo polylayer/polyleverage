@@ -88,11 +88,7 @@ pub struct Session {
 }
 
 pub const SESSION_LEN: usize =
-    1 + 1 + 1 + 1 + 4
-    + 32 + 32
-    + 8 + 8 + 8 + 8 + 8 + 8
-    + 32 * MAX_SESSION_INSTRUMENTS
-    + 64;
+    1 + 1 + 1 + 1 + 4 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 32 * MAX_SESSION_INSTRUMENTS + 64;
 
 const_assert_size!(Session, SESSION_LEN);
 
@@ -192,10 +188,7 @@ impl Session {
     /// Charge `collateral_atoms` against the session's caps. Bumps the
     /// version. Returns the post-charge cumulative_collateral_used.
     /// Caller must have already verified `is_active` + `allows_instrument`.
-    pub fn record_intent(
-        &mut self,
-        collateral_atoms: u64,
-    ) -> Result<u64, ProgramError> {
+    pub fn record_intent(&mut self, collateral_atoms: u64) -> Result<u64, ProgramError> {
         if collateral_atoms == 0 {
             // Posting a zero-collateral intent isn't possible upstream;
             // surface the bug instead of silently passing.
@@ -245,15 +238,7 @@ mod tests {
         let allowed = keys(3);
 
         Session::init(
-            &mut buf,
-            owner,
-            delegate,
-            42,
-            1000,
-            1_000_000,
-            10_000_000,
-            &allowed,
-            500,
+            &mut buf, owner, delegate, 42, 1000, 1_000_000, 10_000_000, &allowed, 500,
         )
         .unwrap();
         let s = Session::load(&buf).unwrap();
@@ -290,9 +275,7 @@ mod tests {
         assert!(Session::init(&mut buf, owner, delegate, 1, 200, 100, 10, &[], 100).is_err());
         // too many instruments
         let too_many = keys(MAX_SESSION_INSTRUMENTS + 1);
-        assert!(
-            Session::init(&mut buf, owner, delegate, 1, 200, 1, 10, &too_many, 100).is_err()
-        );
+        assert!(Session::init(&mut buf, owner, delegate, 1, 200, 1, 10, &too_many, 100).is_err());
     }
 
     #[test]
@@ -322,7 +305,7 @@ mod tests {
         assert!(s.record_intent(501).is_err());
         // Cumulative cap exceeded.
         assert!(s.record_intent(501).is_err()); // first fails per-intent
-        // bring cumulative just under the cap and try to bump it past
+                                                // bring cumulative just under the cap and try to bump it past
         let _ = s.record_intent(500); // now at 2000
         assert!(s.record_intent(1).is_err()); // would be 2001 > cap
     }

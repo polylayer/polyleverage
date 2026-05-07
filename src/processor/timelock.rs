@@ -18,15 +18,12 @@ use solana_program::{
 
 use crate::{
     error::PolyleverageError,
-    instruction::{
-        CancelTimelockArgs, ExecuteTimelockArgs, ProposeSetAttestationSignerArgs,
-    },
+    instruction::{CancelTimelockArgs, ExecuteTimelockArgs, ProposeSetAttestationSignerArgs},
     processor::multisig::authorize_admin_or_multisig,
     seeds::SEED_TIMELOCK,
     state::{
-        ProgramConfig, TimelockProposal, DISC_TIMELOCK, TIMELOCK_DELAY_SECS,
-        TIMELOCK_PROPOSAL_LEN, TL_KIND_SET_ATTESTATION_SIGNER, TL_STATUS_CANCELLED,
-        TL_STATUS_EXECUTED, TL_STATUS_PENDING,
+        ProgramConfig, TimelockProposal, DISC_TIMELOCK, TIMELOCK_DELAY_SECS, TIMELOCK_PROPOSAL_LEN,
+        TL_KIND_SET_ATTESTATION_SIGNER, TL_STATUS_CANCELLED, TL_STATUS_EXECUTED, TL_STATUS_PENDING,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
@@ -87,8 +84,7 @@ pub fn process_propose_set_attestation_signer(
     )?;
 
     let mut data = tl_ai.try_borrow_mut_data()?;
-    let tl: &mut TimelockProposal =
-        bytemuck::from_bytes_mut(&mut data[..TIMELOCK_PROPOSAL_LEN]);
+    let tl: &mut TimelockProposal = bytemuck::from_bytes_mut(&mut data[..TIMELOCK_PROPOSAL_LEN]);
     *tl = TimelockProposal {
         discriminator: DISC_TIMELOCK,
         kind: TL_KIND_SET_ATTESTATION_SIGNER,
@@ -146,7 +142,13 @@ pub fn process_execute_set_attestation_signer(
     let (kind, _proposer, executable_after_unix_ts, status, new_signer) = {
         let data = tl_ai.try_borrow_data()?;
         let tl = TimelockProposal::load(&data)?;
-        (tl.kind, tl.proposer, tl.executable_after_unix_ts, tl.status, tl.new_signer())
+        (
+            tl.kind,
+            tl.proposer,
+            tl.executable_after_unix_ts,
+            tl.status,
+            tl.new_signer(),
+        )
     };
     if status != TL_STATUS_PENDING {
         return Err(PolyleverageError::TimelockNotExecutable.into());

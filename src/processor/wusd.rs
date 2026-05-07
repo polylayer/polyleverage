@@ -78,8 +78,7 @@ pub fn process_wrap_stablecoin(
 
     // Validate PDAs + registry state.
     let _ = assert_pda(&[SEED_WUSD_MINT], program_id, wusd_mint_ai.key)?;
-    let auth_bump =
-        assert_pda(&[SEED_WUSD_AUTHORITY], program_id, wusd_authority_ai.key)?;
+    let auth_bump = assert_pda(&[SEED_WUSD_AUTHORITY], program_id, wusd_authority_ai.key)?;
     {
         let data = registry_ai.try_borrow_data()?;
         let reg = StablecoinRegistry::load(&data)?;
@@ -188,8 +187,7 @@ pub fn process_unwrap_stablecoin(
     }
 
     let _ = assert_pda(&[SEED_WUSD_MINT], program_id, wusd_mint_ai.key)?;
-    let auth_bump =
-        assert_pda(&[SEED_WUSD_AUTHORITY], program_id, wusd_authority_ai.key)?;
+    let auth_bump = assert_pda(&[SEED_WUSD_AUTHORITY], program_id, wusd_authority_ai.key)?;
 
     // Registry lookup — mint must currently be accepted OR at minimum have been
     // accepted and still hold reserves. We keep the "accepted" requirement for

@@ -3,12 +3,7 @@
 //!
 //! Spec §5.2
 
-use crate::{
-    const_assert_size,
-    error::PolyleverageError,
-    pod,
-    seeds::SEED_MARKET_NONCE,
-};
+use crate::{const_assert_size, error::PolyleverageError, pod, seeds::SEED_MARKET_NONCE};
 use bytemuck::{Pod, Zeroable};
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 

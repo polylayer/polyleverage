@@ -48,8 +48,7 @@ pub struct AdminMultisig {
     pub _reserved: [u8; 64],
 }
 
-pub const ADMIN_MULTISIG_LEN: usize =
-    1 + 1 + 1 + 1 + 4 + 32 + 8 + 32 * MAX_MULTISIG_SIGNERS + 64;
+pub const ADMIN_MULTISIG_LEN: usize = 1 + 1 + 1 + 1 + 4 + 32 + 8 + 32 * MAX_MULTISIG_SIGNERS + 64;
 const_assert_size!(AdminMultisig, ADMIN_MULTISIG_LEN);
 
 impl AdminMultisig {
@@ -156,11 +155,7 @@ impl AdminMultisig {
 
     /// Apply a config change in-place. Caller must have verified a
     /// quorum on the old config first.
-    pub fn rotate(
-        &mut self,
-        signers: &[Pubkey],
-        threshold: u8,
-    ) -> Result<(), ProgramError> {
+    pub fn rotate(&mut self, signers: &[Pubkey], threshold: u8) -> Result<(), ProgramError> {
         if signers.is_empty() || signers.len() > MAX_MULTISIG_SIGNERS {
             return Err(PolyleverageError::InvalidInstructionData.into());
         }
@@ -266,8 +261,7 @@ mod tests {
         let signers: Vec<_> = (0..(MAX_MULTISIG_SIGNERS + 1))
             .map(|_| Pubkey::new_unique())
             .collect();
-        let err =
-            AdminMultisig::init(&mut buf, Pubkey::new_unique(), &signers, 2, 0).unwrap_err();
+        let err = AdminMultisig::init(&mut buf, Pubkey::new_unique(), &signers, 2, 0).unwrap_err();
         assert_eq!(
             err,
             ProgramError::Custom(PolyleverageError::InvalidInstructionData as u32)

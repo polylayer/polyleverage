@@ -119,9 +119,7 @@ pub fn compute_max_fee_bps(tiers: &[FeeTierRaw; FEE_SCHEDULE_MAX_TIERS]) -> u16 
 }
 
 /// Validate a new tier table: ascending thresholds, reasonable fee caps.
-pub fn validate_tiers(
-    tiers: &[FeeTierRaw; FEE_SCHEDULE_MAX_TIERS],
-) -> Result<(), ProgramError> {
+pub fn validate_tiers(tiers: &[FeeTierRaw; FEE_SCHEDULE_MAX_TIERS]) -> Result<(), ProgramError> {
     // Monotonic non-decreasing on volume_threshold.
     let mut prev: u64 = 0;
     for t in tiers.iter() {

@@ -3,12 +3,7 @@
 //!
 //! Spec §1.2
 
-use crate::{
-    const_assert_size,
-    error::PolyleverageError,
-    pod,
-    seeds::SEED_MARGIN,
-};
+use crate::{const_assert_size, error::PolyleverageError, pod, seeds::SEED_MARGIN};
 use bytemuck::{Pod, Zeroable};
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 
@@ -38,8 +33,7 @@ pub struct MarginAccount {
     pub _reserved: [u8; 32],
 }
 
-pub const MARGIN_ACCOUNT_LEN: usize =
-    1 + 1 + 6 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 32;
+pub const MARGIN_ACCOUNT_LEN: usize = 1 + 1 + 6 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 32;
 const_assert_size!(MarginAccount, MARGIN_ACCOUNT_LEN);
 
 impl MarginAccount {
@@ -86,10 +80,7 @@ impl MarginAccount {
     }
 
     pub fn find_pda(program_id: &Pubkey, owner: &Pubkey, mint: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(
-            &[SEED_MARGIN, owner.as_ref(), mint.as_ref()],
-            program_id,
-        )
+        Pubkey::find_program_address(&[SEED_MARGIN, owner.as_ref(), mint.as_ref()], program_id)
     }
 
     // --- Safe arithmetic helpers ------------------------------------------

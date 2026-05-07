@@ -1,10 +1,7 @@
 //! Instruction dispatcher.
 
 use borsh::BorshDeserialize;
-use solana_program::{
-    account_info::AccountInfo, entrypoint::ProgramResult,
-    pubkey::Pubkey,
-};
+use solana_program::{account_info::AccountInfo, entrypoint::ProgramResult, pubkey::Pubkey};
 
 use crate::{
     error::PolyleverageError,
@@ -29,11 +26,7 @@ pub mod substitute;
 pub mod timelock;
 pub mod wusd;
 
-pub fn process(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (tag_byte, payload) = data
         .split_first()
         .ok_or(PolyleverageError::InvalidInstructionData)?;
@@ -124,17 +117,13 @@ pub fn process(
                 .map_err(|_| PolyleverageError::InvalidInstructionData)?;
             close_prune::process_close_mutual(program_id, accounts, args)
         }
-        InstructionTag::PruneExpired => {
-            close_prune::process_prune_expired(program_id, accounts)
-        }
+        InstructionTag::PruneExpired => close_prune::process_prune_expired(program_id, accounts),
         InstructionTag::CreateSession => {
             let args = CreateSessionArgs::try_from_slice(payload)
                 .map_err(|_| PolyleverageError::InvalidInstructionData)?;
             session::process_create_session(program_id, accounts, args)
         }
-        InstructionTag::RevokeSession => {
-            session::process_revoke_session(program_id, accounts)
-        }
+        InstructionTag::RevokeSession => session::process_revoke_session(program_id, accounts),
         InstructionTag::PostIntentDelegated => {
             let args = PostIntentArgs::try_from_slice(payload)
                 .map_err(|_| PolyleverageError::InvalidInstructionData)?;

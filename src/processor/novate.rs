@@ -91,7 +91,12 @@ pub fn process_novate(
             SIDE_SHORT => p.short_owner,
             _ => return Err(PolyleverageError::InvalidPmlcSide.into()),
         };
-        (current, p.collateral_per_side, p.collateral_mint, p.instrument)
+        (
+            current,
+            p.collateral_per_side,
+            p.collateral_mint,
+            p.instrument,
+        )
     };
     if expected_current_owner != *current_owner.key {
         return Err(PolyleverageError::InvalidPmlcSide.into());
@@ -111,12 +116,20 @@ pub fn process_novate(
 
     // Validate margin accounts.
     let _current_bump = assert_pda(
-        &[SEED_MARGIN, current_owner.key.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            current_owner.key.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         current_margin_ai.key,
     )?;
     let _new_bump = assert_pda(
-        &[SEED_MARGIN, new_owner.key.as_ref(), collateral_mint.as_ref()],
+        &[
+            SEED_MARGIN,
+            new_owner.key.as_ref(),
+            collateral_mint.as_ref(),
+        ],
         program_id,
         new_margin_ai.key,
     )?;

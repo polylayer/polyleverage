@@ -11,8 +11,7 @@ use crate::error::PolyleverageError;
 
 /// Treat a byte slice as a reference to a single Pod value. Length must match exactly.
 pub fn try_cast_ref<T: Pod>(bytes: &[u8]) -> Result<&T, ProgramError> {
-    bytemuck::try_from_bytes::<T>(bytes)
-        .map_err(|_| PolyleverageError::AccountDataTooSmall.into())
+    bytemuck::try_from_bytes::<T>(bytes).map_err(|_| PolyleverageError::AccountDataTooSmall.into())
 }
 
 /// Mutable variant of [`try_cast_ref`].

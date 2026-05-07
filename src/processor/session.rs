@@ -59,7 +59,11 @@ pub fn process_create_session(
         }
     }
 
-    let bump = assert_pda(&[SEED_SESSION, owner.key.as_ref()], program_id, session_ai.key)?;
+    let bump = assert_pda(
+        &[SEED_SESSION, owner.key.as_ref()],
+        program_id,
+        session_ai.key,
+    )?;
 
     if args.allowed_instruments.len() > MAX_SESSION_INSTRUMENTS {
         return Err(PolyleverageError::InvalidInstructionData.into());
@@ -147,10 +151,7 @@ pub fn process_create_session(
 ///   1. `[writable]` session PDA
 ///
 /// Sets `revoked = 1`. Idempotent.
-pub fn process_revoke_session(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+pub fn process_revoke_session(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let iter = &mut accounts.iter();
     let owner = next_account_info(iter)?;
     let session_ai = next_account_info(iter)?;
@@ -161,7 +162,11 @@ pub fn process_revoke_session(
         return Err(PolyleverageError::InvalidAccountOwner.into());
     }
 
-    let _ = assert_pda(&[SEED_SESSION, owner.key.as_ref()], program_id, session_ai.key)?;
+    let _ = assert_pda(
+        &[SEED_SESSION, owner.key.as_ref()],
+        program_id,
+        session_ai.key,
+    )?;
 
     let mut data = session_ai.try_borrow_mut_data()?;
     let s = Session::load_mut(&mut data)?;

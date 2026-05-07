@@ -129,9 +129,11 @@ impl UserVolume {
         }
         self.epoch_start_slot = self
             .epoch_start_slot
-            .checked_add(epochs_elapsed.checked_mul(length).ok_or(
-                PolyleverageError::ArithmeticOverflow,
-            )?)
+            .checked_add(
+                epochs_elapsed
+                    .checked_mul(length)
+                    .ok_or(PolyleverageError::ArithmeticOverflow)?,
+            )
             .ok_or(PolyleverageError::ArithmeticOverflow)?;
         Ok(())
     }

@@ -206,8 +206,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_leverages() {
         let mut buf = fresh();
-        let err = BucketRegistry::init(&mut buf, &[20_000, 20_000], &[100_000_000], 0)
-            .unwrap_err();
+        let err = BucketRegistry::init(&mut buf, &[20_000, 20_000], &[100_000_000], 0).unwrap_err();
         assert_eq!(
             err,
             ProgramError::Custom(PolyleverageError::InvalidLeverageBucket as u32),
@@ -217,8 +216,8 @@ mod tests {
     #[test]
     fn rejects_duplicate_buckets() {
         let mut buf = fresh();
-        let err = BucketRegistry::init(&mut buf, &[20_000], &[100_000_000, 100_000_000], 0)
-            .unwrap_err();
+        let err =
+            BucketRegistry::init(&mut buf, &[20_000], &[100_000_000, 100_000_000], 0).unwrap_err();
         assert_eq!(
             err,
             ProgramError::Custom(PolyleverageError::InvalidCollateralBucket as u32),

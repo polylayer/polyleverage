@@ -91,11 +91,7 @@ pub fn position_size_fp(notional_atoms: u128, entry_price_fp: u64) -> Result<u12
 
 /// Long-side PnL in quote atoms (signed). Returns `(mark - entry) * size / 1e18`.
 #[inline]
-pub fn pnl_long_atoms(
-    entry_fp: u64,
-    mark_fp: u64,
-    size_fp: u128,
-) -> Result<i128, ProgramError> {
+pub fn pnl_long_atoms(entry_fp: u64, mark_fp: u64, size_fp: u128) -> Result<i128, ProgramError> {
     let delta_fp = (mark_fp as i128) - (entry_fp as i128);
     let size_i = size_fp as i128; // size_fp fits in i128 easily
     delta_fp

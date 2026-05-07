@@ -24,9 +24,7 @@ use solana_program::{
 
 use crate::{
     error::PolyleverageError,
-    state::{
-        Pmlc, PMLC_STATUS_CLOSED, PMLC_STATUS_LIQUIDATED, PMLC_STATUS_RESOLVED,
-    },
+    state::{Pmlc, PMLC_STATUS_CLOSED, PMLC_STATUS_LIQUIDATED, PMLC_STATUS_RESOLVED},
     utils::{assert_signer, assert_writable},
 };
 

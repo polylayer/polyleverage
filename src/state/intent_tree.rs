@@ -10,9 +10,7 @@ use solana_program::program_error::ProgramError;
 
 use crate::error::PolyleverageError;
 
-use super::intent_book::{
-    BookMut, IntentNode, NULL_IDX, RB_BLACK, RB_RED, SIDE_LONG, SIDE_SHORT,
-};
+use super::intent_book::{BookMut, IntentNode, NULL_IDX, RB_BLACK, RB_RED, SIDE_LONG, SIDE_SHORT};
 
 /// Order key: (min_price_fp, post_seq, id). Returns `Ordering` as i8 (-1, 0, 1).
 #[inline]
@@ -391,12 +389,20 @@ pub fn remove(book: &mut BookMut, side: u8, z: u32) -> Result<(), ProgramError> 
         x = z_right;
         let zp = get_parent(book, z)?;
         transplant(book, side, z, z_right)?;
-        x_parent = if x == NULL_IDX { zp } else { get_parent(book, x)? };
+        x_parent = if x == NULL_IDX {
+            zp
+        } else {
+            get_parent(book, x)?
+        };
     } else if z_right == NULL_IDX {
         x = z_left;
         let zp = get_parent(book, z)?;
         transplant(book, side, z, z_left)?;
-        x_parent = if x == NULL_IDX { zp } else { get_parent(book, x)? };
+        x_parent = if x == NULL_IDX {
+            zp
+        } else {
+            get_parent(book, x)?
+        };
     } else {
         y = tree_minimum(book, z_right)?;
         y_original_color = get_color(book, y)?;
@@ -698,9 +704,12 @@ mod tests {
         let a = book.alloc_node().unwrap();
         let b = book.alloc_node().unwrap();
         let c = book.alloc_node().unwrap();
-        book.write_intent(a, mk_intent(SIDE_LONG, 100, 200, 1, 1)).unwrap();
-        book.write_intent(b, mk_intent(SIDE_LONG, 300, 400, 2, 2)).unwrap();
-        book.write_intent(c, mk_intent(SIDE_LONG, 500, 600, 3, 3)).unwrap();
+        book.write_intent(a, mk_intent(SIDE_LONG, 100, 200, 1, 1))
+            .unwrap();
+        book.write_intent(b, mk_intent(SIDE_LONG, 300, 400, 2, 2))
+            .unwrap();
+        book.write_intent(c, mk_intent(SIDE_LONG, 500, 600, 3, 3))
+            .unwrap();
 
         insert(&mut book, SIDE_LONG, a).unwrap();
         insert(&mut book, SIDE_LONG, b).unwrap();
@@ -744,9 +753,12 @@ mod tests {
         let a = book.alloc_node().unwrap();
         let b = book.alloc_node().unwrap();
         let c = book.alloc_node().unwrap();
-        book.write_intent(a, mk_intent(SIDE_LONG, 100, 600, 1, 1)).unwrap();
-        book.write_intent(b, mk_intent(SIDE_LONG, 300, 700, 2, 2)).unwrap();
-        book.write_intent(c, mk_intent(SIDE_LONG, 450, 550, 3, 3)).unwrap();
+        book.write_intent(a, mk_intent(SIDE_LONG, 100, 600, 1, 1))
+            .unwrap();
+        book.write_intent(b, mk_intent(SIDE_LONG, 300, 700, 2, 2))
+            .unwrap();
+        book.write_intent(c, mk_intent(SIDE_LONG, 450, 550, 3, 3))
+            .unwrap();
 
         insert(&mut book, SIDE_LONG, a).unwrap();
         insert(&mut book, SIDE_LONG, b).unwrap();
@@ -795,7 +807,8 @@ mod tests {
             for min in (10..200).step_by(7) {
                 let max = min + 50;
                 let idx = book.alloc_node().unwrap();
-                book.write_intent(idx, mk_intent(side, min, max, seq, seq)).unwrap();
+                book.write_intent(idx, mk_intent(side, min, max, seq, seq))
+                    .unwrap();
                 insert(&mut book, side, idx).unwrap();
                 seq += 1;
             }

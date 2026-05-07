@@ -14,9 +14,7 @@ use polyleverage::{
     },
     state::{
         fee_schedule::{FeeSchedule, FeeTierRaw, FEE_SCHEDULE_LEN, FEE_SCHEDULE_MAX_TIERS},
-        intent_book::{
-            init_intent_book, intent_book_byte_size, BookMut, NODE_TAG_FREE, NULL_IDX,
-        },
+        intent_book::{init_intent_book, intent_book_byte_size, BookMut, NODE_TAG_FREE, NULL_IDX},
         user_volume::{UserVolume, USER_VOLUME_EPOCH_SLOTS, USER_VOLUME_LEN},
     },
 };
@@ -125,13 +123,16 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 fn arb_tiers() -> impl Strategy<Value = Vec<(u64, u16)>> {
-    prop::collection::vec((0u64..=1_000_000_000u64, 0u16..=1_000u16), 1..=FEE_SCHEDULE_MAX_TIERS)
-        .prop_map(|mut v| {
-            // Sort by threshold ascending and de-duplicate.
-            v.sort_by_key(|t| t.0);
-            v.dedup_by_key(|t| t.0);
-            v
-        })
+    prop::collection::vec(
+        (0u64..=1_000_000_000u64, 0u16..=1_000u16),
+        1..=FEE_SCHEDULE_MAX_TIERS,
+    )
+    .prop_map(|mut v| {
+        // Sort by threshold ascending and de-duplicate.
+        v.sort_by_key(|t| t.0);
+        v.dedup_by_key(|t| t.0);
+        v
+    })
 }
 
 proptest! {

@@ -24,9 +24,7 @@ use crate::{
     error::PolyleverageError,
     instruction::{InitAdminMultisigArgs, RotateAdminMultisigArgs},
     seeds::SEED_ADMIN_MULTISIG,
-    state::{
-        AdminMultisig, ProgramConfig, ADMIN_MULTISIG_LEN, DISC_ADMIN_MULTISIG,
-    },
+    state::{AdminMultisig, ProgramConfig, ADMIN_MULTISIG_LEN, DISC_ADMIN_MULTISIG},
     utils::{assert_pda, assert_signer, assert_writable},
 };
 

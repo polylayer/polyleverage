@@ -188,7 +188,10 @@ mod tests {
         let a = Pubkey::new_unique();
         let err =
             StablecoinRegistry::init(&mut buf, Pubkey::new_unique(), 6, &[a, a], 0).unwrap_err();
-        assert_eq!(err, ProgramError::Custom(PolyleverageError::InvalidMint as u32));
+        assert_eq!(
+            err,
+            ProgramError::Custom(PolyleverageError::InvalidMint as u32)
+        );
     }
 
     #[test]

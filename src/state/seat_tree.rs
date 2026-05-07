@@ -7,9 +7,7 @@ use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 
 use crate::error::PolyleverageError;
 
-use super::intent_book::{
-    BookMut, NODE_TAG_SEAT, NULL_IDX, RB_BLACK, RB_RED, SeatNode,
-};
+use super::intent_book::{BookMut, SeatNode, NODE_TAG_SEAT, NULL_IDX, RB_BLACK, RB_RED};
 
 #[inline]
 fn root(book: &BookMut) -> u32 {

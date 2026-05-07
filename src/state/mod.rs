@@ -3,7 +3,6 @@
 pub mod admin_multisig;
 pub mod bucket_registry;
 pub mod fee_schedule;
-pub mod stablecoin_registry;
 pub mod fee_treasury;
 pub mod instrument_config;
 pub mod intent_book;
@@ -14,13 +13,13 @@ pub mod pmlc;
 pub mod program_config;
 pub mod seat_tree;
 pub mod session;
+pub mod stablecoin_registry;
 pub mod timelock;
 pub mod user_volume;
 
 pub use admin_multisig::*;
 pub use bucket_registry::*;
 pub use fee_schedule::*;
-pub use stablecoin_registry::*;
 pub use fee_treasury::*;
 pub use instrument_config::*;
 pub use intent_book::*;
@@ -29,6 +28,7 @@ pub use market_nonce::*;
 pub use pmlc::*;
 pub use program_config::*;
 pub use session::*;
+pub use stablecoin_registry::*;
 pub use timelock::*;
 pub use user_volume::*;
 

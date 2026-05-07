@@ -17,8 +17,8 @@ use crate::{
     seeds::{SEED_BOOK, SEED_BUCKET_REGISTRY, SEED_INSTRUMENT},
     state::{
         init_intent_book, intent_book_byte_size, BookMut, BucketRegistry, FreeNode,
-        InstrumentConfig, ProgramConfig, DISC_BUCKET_REGISTRY, INSTRUMENT_CONFIG_LEN,
-        NODE_SIZE, NODE_TAG_FREE, STATUS_ACTIVE, STATUS_PAUSED,
+        InstrumentConfig, ProgramConfig, DISC_BUCKET_REGISTRY, INSTRUMENT_CONFIG_LEN, NODE_SIZE,
+        NODE_TAG_FREE, STATUS_ACTIVE, STATUS_PAUSED,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
@@ -153,7 +153,11 @@ pub fn process_create_instrument(
     )?;
 
     // Derive and allocate intent book PDA.
-    let book_bump = assert_pda(&[SEED_BOOK, instrument_ai.key.as_ref()], program_id, book_ai.key)?;
+    let book_bump = assert_pda(
+        &[SEED_BOOK, instrument_ai.key.as_ref()],
+        program_id,
+        book_ai.key,
+    )?;
     if book_ai.data_len() != 0 {
         return Err(PolyleverageError::AlreadyInitialized.into());
     }
@@ -195,7 +199,13 @@ pub fn process_create_instrument(
 
     // Initialize the intent book.
     let mut book_data = book_ai.try_borrow_mut_data()?;
-    init_intent_book(&mut book_data, *instrument_ai.key, args.initial_book_capacity, book_bump, 0)?;
+    init_intent_book(
+        &mut book_data,
+        *instrument_ai.key,
+        args.initial_book_capacity,
+        book_bump,
+        0,
+    )?;
 
     Ok(())
 }
