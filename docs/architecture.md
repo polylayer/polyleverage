@@ -1,17 +1,4 @@
-back
-
 # The Polyleverage Protocol Architecture
-
-rust
-solana
-defi
-leverage
-prediction markets
-pyth
-oracles
-attestation
-testing
-litesvm
 
 Polylayer is a trading protocol and platform for crypto, real-world
 assets, and prediction markets. Polyleverage is the part of it that
