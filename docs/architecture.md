@@ -121,7 +121,7 @@ except the status:
    │  status        LIVE → LIQUIDATED | RESOLVED | CLOSED │
    │  long_owner    pubkey                                │
    │  short_owner   pubkey                                │
-   │  entry_price   the overlap midpoint at match         │
+   │  entry_price   midpoint of the crossing prices      │
    │  collateral    c, locked from each side              │
    │  leverage      fixed for the life of the contract    │
    │  size          notional × 1e18 / entry               │
@@ -131,19 +131,22 @@ except the status:
 ## Intents and the order book
 
 A trader does not take a position directly. A trader posts an
-**intent**: a statement of the side they want, a price range they are
-willing to enter at, a number of contracts, and an expiration slot.
-Posting an intent moves `contracts × collateral_bucket` from the
-trader's `free` balance to `reserved`. The collateral is committed but
-not yet at risk.
+**intent**: a statement of the side they want, a **limit price** (the
+worst entry they will accept: a ceiling for a long, a floor for a
+short), a number of contracts, and an expiration slot. Posting an
+intent moves `contracts × collateral_bucket` from the trader's `free`
+balance to `reserved`. The collateral is committed but not yet at
+risk.
 
 Intents rest in an **IntentBook**, one expandable account per
 instrument. The book is a single contiguous account holding a header
 and a pool of fixed-size 96-byte nodes. A node is one of three
 things: an intent, a trader's seat, or a free-list slot. Intents are
-held in two red-black trees, one per side, augmented into interval
-trees so that the matcher can ask "which resting shorts have a range
-overlapping this long" in logarithmic time rather than by scanning.
+held in two red-black trees, one per side, sorted by price. The trees
+are keyed so that the most aggressive order, the highest bid or the
+lowest ask, is the leftmost node, so the matcher reaches the top of
+either side of the book in logarithmic time. This is a standard
+single-price limit order book.
 
 ```
    IntentBook account
@@ -155,7 +158,7 @@ overlapping this long" in logarithmic time rather than by scanning.
    └──────────────────────────────────────────────────────┘
         long tree ─┐                  ┌─ short tree
                    ▼                  ▼
-            (red-black, interval-augmented for overlap queries)
+        (red-black, price-sorted; best-priced order leftmost)
 ```
 
 Keeping the book in one account, rather than one account per order,
@@ -164,17 +167,17 @@ the book's rent a fixed, expandable cost rather than a per-order one.
 
 ## Matching
 
-Two intents on opposite sides match when their price ranges overlap.
-The matcher computes the overlap of the long's range and the short's
-range, and the position's **entry price** is the midpoint of that
-overlap.
+A long and a short cross when the long's limit price is at least the
+short's: the long will pay at least what the short will accept. The
+position's **entry price** is the midpoint of the two limit prices,
+so any surplus between the bid and the ask is split evenly.
 
 ```
-   long  intent     [0.58 ──────────── 0.61]
-   short intent              [0.60 ──────────── 0.63]
-                              └─ overlap ─┘
-                              [0.60, 0.61]
-                          entry = midpoint = 0.605
+   long  intent (bid)    0.61   willing to pay up to 0.61
+   short intent (ask)    0.60   willing to sell down to 0.60
+                         ────
+                  cross: 0.61 >= 0.60
+                  entry = midpoint = 0.605
 ```
 
 When a pair is found, the match resolves into a PMLC in one
@@ -187,14 +190,14 @@ transaction:
         └─────────┬──────────┘
                   ▼
           ┌────────────────┐
-          │   new PMLC     │   entry  = overlap midpoint
+          │   new PMLC     │   entry  = midpoint of the prices
           │   status LIVE  │   size   = notional × 1e18 / entry
           └────────────────┘   notional = collateral × leverage
 ```
 
 Matching can happen two ways. A keeper can name an explicit pair, or
-anyone can call the permissionless matcher, which scans the book for
-the first valid pair. Both paths run the same core logic, so the
+anyone can call the permissionless matcher, which crosses the best
+bid against the best ask. Both paths run the same core logic, so the
 economics are identical regardless of who triggered the match.
 
 A fee applies to the taker, the intent that arrived later. The fee is
@@ -290,7 +293,7 @@ settles. The full lifecycle of a position looks like this:
 ```
         long intent       short intent
              └──── match ──────┘
-                     │  ranges overlap
+                     │  prices cross
                      ▼
               ┌──────────────┐      Novate / Substitute
               │     PMLC     │ ◄──── owners change,
@@ -330,7 +333,7 @@ open market, and it reuses machinery the trader already understands.
 To leave a long position, the owner does exactly what they would do
 to open a short from scratch: they post a short intent. The intent
 rests in the same order book as every other intent. When the matcher
-finds a new trader whose long intent overlaps it, the substitution
+finds a new trader whose long intent crosses it, the substitution
 instruction fires. The crucial point is that it does not open a
 second PMLC. It swaps the exiting owner out of their existing PMLC
 and swaps the new trader in.
@@ -366,7 +369,7 @@ entry, exiting and entering are the same action viewed from two
 sides, and a position can be rolled rather than simply unwound. An
 intent can additionally carry a reentry flag, which is recorded on
 the PMLC it matches into; when that PMLC later closes, the flagged
-side can re-post an intent at the saved range without a fresh signed
+side can re-post an intent at the saved price without a fresh signed
 action, so a closing position can roll directly into the next one.
 
 ## From prediction markets to equities and commodities
@@ -529,7 +532,7 @@ wrong type, an attestation bound to a different position, a replayed
 nonce, an attestation for the wrong market, and a settlement
 transaction carrying no attestation at all. The permissionless intent
 surface is covered the same way: zero-contract intents, invalid side
-bytes, expired intents, inverted price ranges, posting without
+bytes, expired intents, out-of-range prices, posting without
 collateral, and matching two same-side intents. Each adversarial test
 differs from a known-good call in exactly one way, so a rejection
 isolates the vector under test rather than passing for an unrelated
@@ -574,14 +577,11 @@ The order book is the one part of the protocol whose cost depends on
 its size, so it is worth characterizing precisely rather than
 asserting. Two kinds of operation run against it.
 
-Overlap discovery, finding the resting intents that cross a given
-range, uses the interval-augmented trees in `O(log n + k)`. This is a
-*complete* overlap query: it returns every crossing intent, including
-one whose range nests strictly inside the other's and so contains
-neither endpoint. A naive query that only probed the two endpoints
-would miss those nested pairs and leave them unmatched; the matcher
-instead descends the tree with the subtree-max augmentation, which
-returns the full overlapping set.
+Match discovery, finding the best crossing pair, is `O(log n)`. The
+two trees are keyed so that the highest bid and the lowest ask are
+each the leftmost node of their side; the permissionless matcher
+reaches both in logarithmic time and crosses them if the bid is at
+least the ask. If those two do not cross, no pair does.
 
 Identity lookups, finding the node holding a given intent id, and the
 opportunistic prune that `PostIntent` performs, scan the node pool
@@ -597,29 +597,29 @@ capacity rather than how many intents are currently resting.
 ```
    book capacity   PostIntent CU   MatchPair CU
    ────────────────────────────────────────────
-              16           5,679         36,336
-              64           6,308         37,020
-             256          10,304         39,324
-           1,024          21,788         53,040
-           4,096          58,724         88,404
-           8,192         113,472        139,056
+              16           5,580         33,271
+              64           6,209         39,955
+             256          11,705         42,259
+           1,024          20,189         48,475
+           4,096          58,625         91,339
+           8,192         111,873        150,991
    ────────────────────────────────────────────
-   MatchPair  ~  36,000 CU  +  12.6 CU per node
+   MatchPair  ~  33,000 CU  +  13 CU per node
 ```
 
 Both grow linearly, at roughly thirteen compute units per node, and
 the linear fit gives the ceilings directly. `MatchPair` stays within
 Solana's 200,000 CU default per-instruction limit up to a book of
-about 13,000 node slots. Raising the transaction's compute budget to
+about 12,000 node slots. Raising the transaction's compute budget to
 the 1,400,000 CU maximum, which costs a single `ComputeBudget`
-instruction, extends that to about 105,000 slots. That is also near
+instruction, extends that to about 95,000 slots. That is also near
 the point at which the book account reaches Solana's 10 MiB size cap,
 so the compute ceiling and the storage ceiling roughly coincide.
 
 In practice this is substantial headroom. The protocol shards by
 instrument: every (asset, leverage, bucket) is its own book account,
 processed independently. A single instrument would need on the order
-of 13,000 intents resting at once before matching even required a
+of 12,000 intents resting at once before matching even required a
 raised compute budget, which is far above realistic depth for one
 per-bucket market. Throughput across the protocol scales with the
 number of instruments, and that axis of scale costs nothing.
@@ -656,11 +656,11 @@ deposits to a settled, closed account:
    │              IntentBook   (per instrument)             │
    │     long tree  ◄──────  matcher  ──────►  short tree   │
    └───────────────────────────┬────────────────────────────┘
-                               │  ranges overlap
+                               │  prices cross
                                │  both sides: reserved → locked
                                ▼
                       ┌──────────────────┐
-                      │       PMLC       │   entry = overlap midpoint
+                      │       PMLC       │   entry = midpoint of prices
                       │   long:A short:B │   each side locks c
                       │    status LIVE   │
                       └────────┬─────────┘
