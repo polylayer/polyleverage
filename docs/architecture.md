@@ -430,37 +430,6 @@ The **multi-asset** layer drives the program at the leverage and
 margin bucket extremes and runs a full lifecycle on a normalized real
 Pyth price.
 
-## What the testing found
-
-A test suite earns its keep by finding things, and this one found two
-that thinner coverage would have missed.
-
-The first was a reachability bug in settlement. Liquidation,
-resolution, and mutual close all require a per-market nonce account,
-which they load and expect to be initialized. The function that
-initialized that account existed but had no callers anywhere in the
-program. No instruction created it, and settlement did no lazy
-initialization. Because a program derived address can only be created
-by its own program, no external client could create it either. The
-consequence was that all three settlement paths were unreachable on a
-fresh deployment. The bug surfaced the first time a liquidation test
-ran against the real program: the transaction simply failed. The fix
-was to have instrument creation also create the nonce account,
-idempotently, since the account is shared across every instrument on
-a market.
-
-The second was a design error caught by an executing test. The
-multi-asset expansion was first analyzed as needing no on-chain change
-at all. The first multi-asset test disproved that immediately:
-instrument creation rejected a Pyth-sourced instrument because of the
-two hardcoded allowlists described earlier. The analysis was wrong,
-the test said so before any of it shipped, and the design and the
-code were corrected together.
-
-Neither finding is dramatic. That is the point. Both are the kind of
-gap that a specification reads past and that only an execution of the
-real program against a real transaction surfaces.
-
 ## Performance
 
 Every instruction sits well within Solana's per-instruction compute
