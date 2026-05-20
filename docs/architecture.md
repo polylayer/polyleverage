@@ -52,15 +52,27 @@ equity_long  = clamp(c + pnl_long,  0, 2c)
 equity_short = 2c - equity_long
 ```
 
-The clamp is the safety property. However extreme the price move,
-however high the leverage, a side's equity can never fall below zero
-and never rise above `2c`, and the two equities always sum to exactly
-`2c`. No value is created or destroyed at settlement, and there is no
-amount the protocol can be asked to cover. Because the loss is bounded
-by construction rather than by a liquidation engine winning a race,
-leverage as high as 1000x is safe to offer. At 1000x a price move of
-a tenth of a percent against a position consumes the entire `c`, but
-that is the trader's `c` and nobody else's.
+The clamp is the safety property. It holds three invariants no matter
+how far or how fast the price moves, and no matter the leverage:
+
+```
+   ┌──────────────────────────────────────────────────────────┐
+   │   0  ≤  equity_long   ≤  2c                                │
+   │   0  ≤  equity_short  ≤  2c                                │
+   │       equity_long  +  equity_short  =  2c     (always)     │
+   │                                                            │
+   │   most a trader can lose  =  c   (their own collateral)    │
+   │   most a trader can win   =  c   (the counterparty's c)    │
+   │   amount the protocol can be asked to cover  =  0          │
+   └──────────────────────────────────────────────────────────┘
+```
+
+No value is created or destroyed at settlement, and there is no
+amount the protocol can be asked to cover. Because the loss is
+bounded by construction rather than by a liquidation engine winning a
+race, leverage as high as 1000x is safe to offer. At 1000x a price
+move of a tenth of a percent against a position consumes the entire
+`c`, but that is the trader's `c` and nobody else's.
 
 Leverage, then, is not a property of a margin account. It is a
 property baked into the contract at match time, and the contract is a
@@ -69,6 +81,16 @@ closed system from that point forward.
 ## The objects
 
 Four kinds of account carry the protocol's state.
+
+```
+   ProgramConfig (singleton)
+         │
+         ├── InstrumentConfig ──── IntentBook (one order book)
+         │         │
+         │         └── PMLC, PMLC, PMLC, ...   (matched positions)
+         │
+         └── MarginAccount   (one per trader, per collateral mint)
+```
 
 A **ProgramConfig** is the singleton root. It records the admin
 authority, the public key the program accepts attestations from, and
@@ -82,24 +104,41 @@ blob; what it identifies is the off-chain attestor's concern, not the
 program's.
 
 A **MarginAccount** is one trader's collateral ledger for one
-collateral mint. It separates three balances: `free` collateral the
-trader can withdraw or commit, `reserved` collateral committed to
-resting intents, and `locked` collateral committed to live positions.
-Every state transition moves value between these three buckets, and
-the program's arithmetic helpers are the only way to do so.
-
-A **PMLC** is a live position: two owners, an entry price, a
-collateral amount per side, a leverage, a derived position size, and
-a status.
+collateral mint. It separates three balances, and value only ever
+moves between them, never in or out except by deposit and withdraw:
 
 ```
-ProgramConfig (singleton)
-      │
-      ├── InstrumentConfig ──── IntentBook (order book)
-      │         │
-      │         └── PMLC, PMLC, PMLC, ...   (matched positions)
-      │
-      └── MarginAccount per (trader, mint)
+                deposit                         withdraw
+                   │                               ▲
+                   ▼                               │
+   ┌───────────────────┐   PostIntent   ┌────────────────┐
+   │       free        │ ─────────────► │    reserved    │
+   │ withdrawable,     │ ◄───────────── │ committed to a │
+   │ usable for posts  │  cancel/prune  │ resting intent │
+   └───────────────────┘                └───────┬────────┘
+        ▲                                       │ match
+        │            settle                     ▼
+        │                              ┌────────────────┐
+        └───────────────────────────── │     locked     │
+                                       │ committed to a │
+                                       │  live position │
+                                       └────────────────┘
+```
+
+A **PMLC** is a live position. Every field is fixed at match time
+except the status:
+
+```
+   PMLC  (one account per matched position)
+   ┌────────────────────────────────────────────────────┐
+   │  status        LIVE → LIQUIDATED | RESOLVED | CLOSED │
+   │  long_owner    pubkey                                │
+   │  short_owner   pubkey                                │
+   │  entry_price   the overlap midpoint at match         │
+   │  collateral    c, locked from each side              │
+   │  leverage      fixed for the life of the contract    │
+   │  size          notional × 1e18 / entry               │
+   └────────────────────────────────────────────────────┘
 ```
 
 ## Intents and the order book
@@ -120,16 +159,16 @@ trees so that the matcher can ask "which resting shorts have a range
 overlapping this long" in logarithmic time rather than by scanning.
 
 ```
-IntentBook account
-┌────────────────────────────────────────────────┐
-│ header: tree roots, free-list head, counters    │
-├────────────────────────────────────────────────┤
-│ node 1 │ node 2 │ node 3 │ ... │ node N         │
-│  each node = intent | seat | free slot (96 B)   │
-└────────────────────────────────────────────────┘
-   long tree ─┐         ┌─ short tree
-              ▼         ▼
-        (red-black + interval-augmented)
+   IntentBook account
+   ┌────────────────────────────────────────────────────┐
+   │ header   tree roots · free-list head · counters     │
+   ├────────────────────────────────────────────────────┤
+   │ node 1 │ node 2 │ node 3 │ ........ │ node N         │
+   │  each node, 96 B = intent | seat | free slot         │
+   └────────────────────────────────────────────────────┘
+        long tree ─┐                  ┌─ short tree
+                   ▼                  ▼
+            (red-black, interval-augmented for overlap queries)
 ```
 
 Keeping the book in one account, rather than one account per order,
@@ -141,27 +180,35 @@ the book's rent a fixed, expandable cost rather than a per-order one.
 Two intents on opposite sides match when their price ranges overlap.
 The matcher computes the overlap of the long's range and the short's
 range, and the position's **entry price** is the midpoint of that
-overlap. A long willing to enter at `[0.58, 0.61]` and a short
-willing to enter at `[0.60, 0.63]` overlap on `[0.60, 0.61]` and
-match at `0.605`.
+overlap.
 
 ```
-long  intent     [0.58 ──────── 0.61]
-short intent          [0.60 ──────── 0.63]
-                       └ overlap ┘
-                        [0.60,0.61]
-                     entry = 0.605
+   long  intent     [0.58 ──────────── 0.61]
+   short intent              [0.60 ──────────── 0.63]
+                              └─ overlap ─┘
+                              [0.60, 0.61]
+                          entry = midpoint = 0.605
+```
+
+When a pair is found, the match resolves into a PMLC in one
+transaction:
+
+```
+   long intent          short intent
+        │                    │
+        │  reserved → locked  │  reserved → locked
+        └─────────┬──────────┘
+                  ▼
+          ┌────────────────┐
+          │   new PMLC     │   entry  = overlap midpoint
+          │   status LIVE  │   size   = notional × 1e18 / entry
+          └────────────────┘   notional = collateral × leverage
 ```
 
 Matching can happen two ways. A keeper can name an explicit pair, or
 anyone can call the permissionless matcher, which scans the book for
 the first valid pair. Both paths run the same core logic, so the
-economics are identical regardless of who triggered the match. At
-match time each side's `reserved` collateral becomes `locked`, a PMLC
-account is created, and its fields are filled in: the two owners, the
-entry price, the collateral per side, the leverage, and a position
-size derived as `notional × 1e18 / entry` where `notional` is
-`collateral × leverage`.
+economics are identical regardless of who triggered the match.
 
 A fee applies to the taker, the intent that arrived later. The fee is
 volume-tiered: each trader's rolling 30-day volume is tracked in a
@@ -196,11 +243,19 @@ the market resolved yes, no, or fifty-fifty.
 
 In every case the program does not trust the caller for the price. It
 trusts an **attestation**: a fixed 104-byte message, signed by the
-key registered in ProgramConfig, carrying a magic tag, a type, the
-market identifier, a timestamp, a nonce, and a type-specific payload.
-A liquidation attestation additionally binds itself to one specific
-PMLC by public key, so the same signed price cannot be replayed
-against a different position.
+key registered in ProgramConfig.
+
+```
+   attestation message — 104 bytes, Ed25519-signed by the attestor
+
+   offset  0     4    5      8            40      48        56      104
+           ┌─────┬────┬──────┬────────────┬───────┬─────────┬────────┐
+           │ATT1 │type│ resv │ market_id  │  ts   │  nonce  │payload │
+           │ 4 B │1 B │ 3 B  │   32 B     │  8 B  │   8 B   │  48 B  │
+           └─────┴────┴──────┴────────────┴───────┴─────────┴────────┘
+   a liquidation payload additionally binds one PMLC by pubkey, so the
+   same signed price cannot be replayed against a different position
+```
 
 The signature is checked in an unusual but deliberate way. Solana
 exposes an Ed25519 signature-verification primitive as a precompiled
@@ -213,16 +268,18 @@ registered attestor and the message is the attestation being acted
 on.
 
 ```
-settlement transaction
-┌──────────────────────────────────────────────┐
-│  ix[0]  Ed25519 precompile                    │
-│         verifies sig over the attestation     │
-├──────────────────────────────────────────────┤
-│  ix[1]  Liquidate / Resolve                   │
-│         reads ix[0] from the instructions     │
-│         sysvar, confirms signer == attestor   │
-│         and message == this attestation       │
-└──────────────────────────────────────────────┘
+   settlement transaction
+   ┌────────────────────────────────────────────────────┐
+   │  ix[0]   Ed25519 precompile                         │
+   │          verifies sig over the 104-byte attestation │
+   ├────────────────────────────────────────────────────┤
+   │  ix[1]   Liquidate / Resolve                        │
+   │          reads ix[0] back from the instructions     │
+   │          sysvar, and confirms:                      │
+   │            program  == Ed25519 precompile           │
+   │            signer   == registered attestor          │
+   │            message  == this attestation             │
+   └────────────────────────────────────────────────────┘
 ```
 
 Freshness and replay are handled by a per-market nonce account. Each
@@ -241,10 +298,34 @@ parameter in the program.
 ## Exiting a position
 
 A PMLC has no fixed expiry. Once matched it stays live until it
-settles, and the settlement paths above (liquidation, resolution,
-mutual close) are one way it ends. But a trader rarely wants to wait
-for the underlying market to resolve. Three mechanisms let an owner
-leave a live position early.
+settles. The full lifecycle of a position looks like this:
+
+```
+        long intent       short intent
+             └──── match ──────┘
+                     │  ranges overlap
+                     ▼
+              ┌──────────────┐      Novate / Substitute
+              │     PMLC     │ ◄──── owners change,
+              │  status LIVE │       the PMLC stays LIVE
+              └──────┬───────┘
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+   Liquidate      Resolve     CloseMutual
+        │            │            │
+        ▼            ▼            ▼
+   LIQUIDATED    RESOLVED      CLOSED
+        └────────────┼────────────┘
+                     ▼
+                 ClosePmlc
+              (account closed,
+               rent refunded)
+```
+
+The settlement paths above are one way a position ends. But a trader
+rarely wants to wait for the underlying market to resolve. Three
+mechanisms let an owner leave a live position early.
 
 The simplest is **mutual close**: both owners of a PMLC agree to tear
 it down, and each takes back collateral adjusted by the position's
@@ -268,17 +349,18 @@ second PMLC. It swaps the exiting owner out of their existing PMLC
 and swaps the new trader in.
 
 ```
-before:  PMLC = (long: Alice, short: Bob)
+   before:   PMLC = ( long: Alice ,  short: Bob )
 
-         Alice posts a short intent ─┐
-                                     ├─ matched in the order book
-         Carol posts a long intent ─┘
-                                     ▼
-after:   PMLC = (long: Carol, short: Bob)
+             Alice posts a short intent ─┐
+                                         ├── matched in the order book
+             Carol posts a long  intent ─┘
+                                         │
+                                         ▼
+   after:    PMLC = ( long: Carol ,  short: Bob )
 
-         Alice's collateral c unlocks back to free
-         Carol's collateral c locks in
-         Bob, the untouched side, is unaffected
+             Alice's collateral c   unlocks  → free
+             Carol's collateral c   locks in ← reserved
+             Bob, the untouched side, is not affected
 ```
 
 Substitution can settle the exiting owner's profit on-chain. The
@@ -317,6 +399,22 @@ dollar price can be normalized into the program's `(0, 1)`
 fixed-point by dividing by a per-instrument reference ceiling, and
 the normalization is economically exact: it scales out of every
 number that matters.
+
+```
+   Pyth feed     BTC/USD = $66,849.09     (raw 6_684_909_218_226, expo -8)
+
+   per-instrument reference ceiling       $1,000,000
+
+         price_fp  =  price  /  reference  ×  1e18
+                   =  $66,849.09 / $1,000,000  ×  1e18
+                   =  66,849,092,182,260,000
+
+   ┌───────────────────────────────────────────────────────────┐
+   │  0 ····························· price_fp ··············· 1e18 │
+   │                          ▲                                 │
+   │                  ≈ 0.0668, well inside (0, 1)               │
+   └───────────────────────────────────────────────────────────┘
+```
 
 It was not ready in another respect. The program validated that every
 price was strictly inside `(0, 1)`, and it gated instrument creation
@@ -374,40 +472,67 @@ production counterparts.
 
 ## The harness
 
-The test harness, `polyleverage-simulator`, is a small Rust crate
-with four parts.
+The test harness, `polyleverage-simulator`, is a small Rust crate.
+Underneath the tests sits the real program, not a model of it:
 
-A driver loads the program, derives addresses, funds accounts,
+```
+   polyleverage-simulator
+   ┌──────────────────────────────────────────────────────────┐
+   │  tests/     end-to-end · adversarial · perf · multi-asset │
+   ├──────────────────────────────────────────────────────────┤
+   │  driver  ·  attestor  ·  scenario  ·  pricing             │
+   ├──────────────────────────────────────────────────────────┤
+   │  litesvm        in-process Solana VM — no validator,      │
+   │                 no network, clock set directly           │
+   ├──────────────────────────────────────────────────────────┤
+   │  polyleverage.so    real SBF bytecode (cargo build-sbf)   │
+   └──────────────────────────────────────────────────────────┘
+```
+
+The **driver** loads the program, derives addresses, funds accounts,
 frames instructions, and submits transactions. It exposes one typed
 helper per instruction, so a test reads as a sequence of intent
 ("post a long, match it, liquidate it") rather than as account-list
 plumbing.
 
-An attestor module is the simulated signer. It frames and signs the
-attestation types and builds the Ed25519 precompile instruction,
+The **attestor** module is the simulated signer. It frames and signs
+the attestation types and builds the Ed25519 precompile instruction,
 using the program crate's own layout constants so the harness cannot
 silently drift from the on-chain wire format.
 
-A scenario builder assembles the substrate every settlement test
-needs: a configured program, a fee schedule, a collateral mint and
-vault, an instrument, and two funded traders. It can drive a long and
-a short into a matched position, so each test writes only the part
-that is actually under test.
+The **scenario** builder assembles the substrate every settlement
+test needs: a configured program, a fee schedule, a collateral mint
+and vault, an instrument, and two funded traders. It can drive a long
+and a short into a matched position, so each test writes only the
+part that is actually under test.
 
-A pricing module performs the off-chain price normalization, the same
-integer formula the Pyth feeder applies, so the multi-asset tests can
-open positions at a normalized real price.
+The **pricing** module performs the off-chain price normalization,
+the same integer formula the Pyth feeder applies, so the multi-asset
+tests can open positions at a normalized real price.
 
 ## What the suite covers
 
 The suite is thirty-six test functions in four layers.
 
-The **end-to-end** layer walks the protocol's lifecycle: deposit and
-withdrawal, instrument creation, intent posting and matching,
-liquidation, resolution, position close, novation of a position side
-to a new owner, substitution, the governance timelock, and the
-emergency pause. Each flow is checked on its success path and on at
-least one rejection path.
+```
+   ┌─────────────┬──────────────────────────────────────────────┐
+   │ end-to-end  │ deposit · withdraw · create instrument ·     │
+   │             │ post · match · liquidate · resolve · close · │
+   │             │ novate · substitute · timelock · pause       │
+   ├─────────────┼──────────────────────────────────────────────┤
+   │ adversarial │ forged signer · wrong attestation type ·     │
+   │             │ wrong PMLC · replayed nonce · wrong market · │
+   │             │ missing attestation · malformed intents      │
+   ├─────────────┼──────────────────────────────────────────────┤
+   │ performance │ every instruction metered, hard CU ceiling   │
+   ├─────────────┼──────────────────────────────────────────────┤
+   │ multi-asset │ leverage / bucket extremes · normalized      │
+   │             │ real Pyth price through a full lifecycle     │
+   └─────────────┴──────────────────────────────────────────────┘
+```
+
+The **end-to-end** layer walks the protocol's lifecycle. Each flow is
+checked on its success path and on at least one rejection path.
 
 The **adversarial** layer encodes the threat model directly.
 Settlement is the trust boundary, so it receives the most attention.
@@ -433,12 +558,71 @@ Pyth price.
 ## Performance
 
 Every instruction sits well within Solana's per-instruction compute
-budget. The heaviest is matching, at roughly thirty-eight thousand
-compute units against a two-hundred-thousand limit, because a match
-does the most work in one transaction: it resolves both intents, runs
-the matching math, lazily creates the fee and volume accounts on
-first use, and allocates the position account. Everything else is
-under seventeen thousand. The protocol has substantial headroom.
+budget:
+
+```
+   instruction                         compute units
+   ──────────────────────────────────────────────────
+   ClosePmlc                                    1,356
+   PostIntent   (long / short)          5,071 / 6,774
+   Novate                                       9,633
+   Resolve      (incl. attestation verify)     11,360
+   Withdraw                                    15,408
+   Deposit                                     15,553
+   Liquidate    (incl. attestation verify)     16,302
+   MatchPair                                   37,623   ◄ hot path
+   ──────────────────────────────────────────────────
+   Solana per-instruction limit               200,000
+```
+
+The heaviest is matching, because a match does the most work in one
+transaction: it resolves both intents, runs the matching math, lazily
+creates the fee and volume accounts on first use, and allocates the
+position account. Everything else is well under seventeen thousand.
+The protocol has substantial headroom.
+
+## The whole picture
+
+Flattened into one diagram, a position's life runs from two traders'
+deposits to a settled, closed account:
+
+```
+   Trader A                                          Trader B
+      │ deposit                                         │ deposit
+      ▼                                                 ▼
+   MarginAccount A                              MarginAccount B
+      │ PostIntent (long)                              │ PostIntent (short)
+      │  free → reserved                               │  free → reserved
+      ▼                                                ▼
+   ┌──────────────────────────────────────────────────────┐
+   │              IntentBook   (per instrument)            │
+   │     long tree  ◄──────  matcher  ──────►  short tree   │
+   └───────────────────────────┬──────────────────────────┘
+                               │  ranges overlap
+                               │  both sides: reserved → locked
+                               ▼
+                      ┌──────────────────┐
+                      │       PMLC       │   entry = overlap midpoint
+                      │   long:A short:B │   each side locks c
+                      │    status LIVE   │
+                      └────────┬─────────┘
+                               │
+            ┌──────────────────┼───────────────────┐
+            ▼                  ▼                   ▼
+      attestation         attestation         opposite intent
+      (breach mark)       (resolution)         matched in book
+            │                  │                   │
+            ▼                  ▼                   ▼
+       LIQUIDATED          RESOLVED          owners swapped
+            │                  │              (PMLC stays LIVE)
+            └──── equity clamped to [0, 2c] ────┘
+                  locked → free, settled
+```
+
+The attestor sources prices, normalizes them, and signs; the
+on-chain program verifies the signature and moves locked collateral
+within the `[0, 2c]` bound. No price move, at any leverage, asks the
+protocol to cover a gap.
 
 ## Scope
 
@@ -450,7 +634,7 @@ not exercise the program on a live cluster under real validator
 scheduling. The program should be treated as pre-production until
 those steps are complete.
 
-What the design does provide, and what the testing confirms, is the
+What the design provides, and what the testing confirms, is the
 property the protocol is built around: a polyleverage position is a
 closed system between two traders, its losses are bounded to posted
 collateral by construction, and no price move, at any leverage, asks
