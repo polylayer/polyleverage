@@ -246,7 +246,7 @@ trusts an **attestation**: a fixed 104-byte message, signed by the
 key registered in ProgramConfig.
 
 ```
-   attestation message — 104 bytes, Ed25519-signed by the attestor
+   attestation message, 104 bytes, Ed25519-signed by the attestor
 
    offset  0     4    5      8            40      48        56      104
            ┌─────┬────┬──────┬────────────┬───────┬─────────┬────────┐
@@ -482,7 +482,7 @@ Underneath the tests sits the real program, not a model of it:
    ├──────────────────────────────────────────────────────────┤
    │  driver  ·  attestor  ·  scenario  ·  pricing             │
    ├──────────────────────────────────────────────────────────┤
-   │  litesvm        in-process Solana VM — no validator,      │
+   │  litesvm        in-process Solana VM, no validator,      │
    │                 no network, clock set directly           │
    ├──────────────────────────────────────────────────────────┤
    │  polyleverage.so    real SBF bytecode (cargo build-sbf)   │
