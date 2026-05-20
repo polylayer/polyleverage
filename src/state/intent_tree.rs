@@ -594,6 +594,75 @@ pub fn first_active_containing(
     Ok(found)
 }
 
+// --- Range-overlap query ---------------------------------------------------
+
+/// Visit every intent whose interval `[min, max]` overlaps the query interval
+/// `[q_min, q_max]`. Two intervals overlap iff `min <= q_max && max >= q_min`.
+/// Traversal is in-order (sorted by key) subject to augmentation pruning.
+///
+/// Unlike two point queries at the query endpoints, this is a *complete*
+/// overlap query: it also returns intervals nested strictly inside
+/// `[q_min, q_max]`, which contain neither endpoint. `O(log n + k)`.
+///
+/// `visitor` returns `true` to continue or `false` to stop early.
+pub fn for_each_overlapping<F>(
+    book: &BookMut,
+    side: u8,
+    q_min: u64,
+    q_max: u64,
+    mut visitor: F,
+) -> Result<(), ProgramError>
+where
+    F: FnMut(u32, &IntentNode) -> bool,
+{
+    let root = tree_root(book, side)?;
+    if root == NULL_IDX {
+        return Ok(());
+    }
+    const STACK_CAP: usize = 64;
+    let mut stack: [u32; STACK_CAP] = [NULL_IDX; STACK_CAP];
+    let mut sp: usize = 0;
+    let mut cur = root;
+
+    loop {
+        // Descend left as far as possible.
+        while cur != NULL_IDX {
+            // Prune: if every interval in this subtree ends before q_min,
+            // none can overlap `[q_min, q_max]`.
+            let sm = book.intent(cur)?.subtree_max_fp;
+            if sm < q_min {
+                break;
+            }
+            if sp >= STACK_CAP {
+                return Err(PolyleverageError::ArithmeticOverflow.into());
+            }
+            stack[sp] = cur;
+            sp += 1;
+            cur = get_left(book, cur)?;
+        }
+        if sp == 0 {
+            break;
+        }
+        sp -= 1;
+        let top = stack[sp];
+        let node = book.intent(top)?;
+        if node.min_price_fp <= q_max && node.max_price_fp >= q_min {
+            if !visitor(top, node) {
+                return Ok(());
+            }
+        }
+        // The tree is keyed by min, so the right subtree's intervals all
+        // have min >= this node's. If this node's min already exceeds
+        // q_max, none of them can overlap.
+        if node.min_price_fp <= q_max {
+            cur = node.right;
+        } else {
+            cur = NULL_IDX;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,6 +861,52 @@ mod tests {
         let found = first_active_containing(&book, SIDE_LONG, 500).unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().0, b);
+    }
+
+    #[test]
+    fn test_overlapping_query_catches_nested_intervals() {
+        let mut buf = mk_book(64);
+        let mut book = BookMut::load(&mut buf).unwrap();
+
+        // Two short intervals nested strictly inside [100, 600], plus one
+        // far outside it.
+        let a = book.alloc_node().unwrap();
+        let b = book.alloc_node().unwrap();
+        let c = book.alloc_node().unwrap();
+        book.write_intent(a, mk_intent(SIDE_SHORT, 200, 300, 1, 1))
+            .unwrap();
+        book.write_intent(b, mk_intent(SIDE_SHORT, 400, 500, 2, 2))
+            .unwrap();
+        book.write_intent(c, mk_intent(SIDE_SHORT, 1000, 1100, 3, 3))
+            .unwrap();
+        insert(&mut book, SIDE_SHORT, a).unwrap();
+        insert(&mut book, SIDE_SHORT, b).unwrap();
+        insert(&mut book, SIDE_SHORT, c).unwrap();
+
+        // [200,300] and [400,500] contain neither 100 nor 600, so point
+        // queries at the endpoints find nothing.
+        let mut pt = Vec::new();
+        for_each_containing(&book, SIDE_SHORT, 100, |i, _| {
+            pt.push(i);
+            true
+        })
+        .unwrap();
+        for_each_containing(&book, SIDE_SHORT, 600, |i, _| {
+            pt.push(i);
+            true
+        })
+        .unwrap();
+        assert!(pt.is_empty(), "point queries miss nested intervals");
+
+        // The overlap query finds both nested intervals and excludes the
+        // far one.
+        let mut hits = Vec::new();
+        for_each_overlapping(&book, SIDE_SHORT, 100, 600, |i, _| {
+            hits.push(i);
+            true
+        })
+        .unwrap();
+        assert_eq!(hits, vec![a, b]);
     }
 
     #[test]
