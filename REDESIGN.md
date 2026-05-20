@@ -50,5 +50,10 @@ referenced the range.
 - [x] 7. `processor/reentry.rs` + `processor/substitute.rs`: single price.
 - [x] 8. `instruction.rs`: `PostIntentArgs` single price.
 - [x] 9. Build `cargo build-sbf` clean; `cargo test` (program unit tests) pass.
-- [ ] 10. Update `polyleverage-simulator` driver + scenario + tests + benchmarks.
-- [ ] 11. Update `docs/architecture.md`.
+- [x] 10. Update `polyleverage-simulator` driver + scenario + tests + benchmarks.
+- [x] 11. Update `docs/architecture.md`.
+
+## Done
+
+All 11 steps complete. Program: 72 unit tests pass, SBF builds clean.
+Simulator: 46 harness tests pass against the rebuilt program.
