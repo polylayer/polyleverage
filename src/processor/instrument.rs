@@ -72,12 +72,13 @@ pub fn process_create_instrument(
 
     // Validate input config.
     //
-    // Prior to v2.2 this was gated by a hard-coded `ALLOWED_LEVERAGE_BPS`
-    // constant. It is now gated by the admin-managed `BucketRegistry` —
-    // clients pass the registry PDA as an extra account after the system
-    // program. If omitted (legacy callers), we fall back to the
-    // per-instrument validity check (nonzero + tick aligned); admins who
-    // want the extra safety-net initialize the registry and pass it here.
+    // `leverage_bps` is always checked against the hard-coded
+    // `ALLOWED_LEVERAGE_BPS` allowlist in `InstrumentConfig::init`
+    // (via `validate_bucket_config`); that check is unconditional.
+    // The optional `BucketRegistry` below is an *additional*,
+    // admin-managed gate (defence in depth), not a replacement:
+    // clients may pass the registry PDA as a trailing account, and
+    // when present it must also admit the leverage and bucket.
     if args.initial_book_capacity < 16 {
         return Err(PolyleverageError::InvalidInstructionData.into());
     }
