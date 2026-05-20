@@ -572,12 +572,21 @@ The protocol has substantial headroom.
 
 The order book is the one part of the protocol whose cost depends on
 its size, so it is worth characterizing precisely rather than
-asserting. Two kinds of operation run against it. Overlap queries,
-which find the resting shorts that cross a given long, use the
-interval-augmented trees and run in `O(log n + k)`. Identity lookups,
-which find the node holding a given intent id, and the opportunistic
-prune that `PostIntent` performs, scan the node pool linearly.
-`MatchPair` resolves two intents by id, so it carries two such scans.
+asserting. Two kinds of operation run against it.
+
+Overlap discovery, finding the resting intents that cross a given
+range, uses the interval-augmented trees in `O(log n + k)`. This is a
+*complete* overlap query: it returns every crossing intent, including
+one whose range nests strictly inside the other's and so contains
+neither endpoint. A naive query that only probed the two endpoints
+would miss those nested pairs and leave them unmatched; the matcher
+instead descends the tree with the subtree-max augmentation, which
+returns the full overlapping set.
+
+Identity lookups, finding the node holding a given intent id, and the
+opportunistic prune that `PostIntent` performs, scan the node pool
+linearly. `MatchPair` resolves two intents by id, so it carries two
+such scans.
 
 A linear scan invites concern, so it was measured rather than
 assumed. The scaling benchmark grows a book to a target node capacity
