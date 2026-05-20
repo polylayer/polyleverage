@@ -56,7 +56,7 @@ The clamp is the safety property. It holds three invariants no matter
 how far or how fast the price moves, and no matter the leverage:
 
 ```
-   ┌──────────────────────────────────────────────────────────┐
+   ┌────────────────────────────────────────────────────────────┐
    │   0  ≤  equity_long   ≤  2c                                │
    │   0  ≤  equity_short  ≤  2c                                │
    │       equity_long  +  equity_short  =  2c     (always)     │
@@ -64,7 +64,7 @@ how far or how fast the price moves, and no matter the leverage:
    │   most a trader can lose  =  c   (their own collateral)    │
    │   most a trader can win   =  c   (the counterparty's c)    │
    │   amount the protocol can be asked to cover  =  0          │
-   └──────────────────────────────────────────────────────────┘
+   └────────────────────────────────────────────────────────────┘
 ```
 
 No value is created or destroyed at settlement, and there is no
@@ -118,11 +118,11 @@ moves between them, never in or out except by deposit and withdraw:
    └───────────────────┘                └───────┬────────┘
         ▲                                       │ match
         │            settle                     ▼
-        │                              ┌────────────────┐
-        └───────────────────────────── │     locked     │
-                                       │ committed to a │
-                                       │  live position │
-                                       └────────────────┘
+        │                               ┌────────────────┐
+        └────────────────────────────── │     locked     │
+                                        │ committed to a │
+                                        │  live position │
+                                        └────────────────┘
 ```
 
 A **PMLC** is a live position. Every field is fixed at match time
@@ -130,7 +130,7 @@ except the status:
 
 ```
    PMLC  (one account per matched position)
-   ┌────────────────────────────────────────────────────┐
+   ┌──────────────────────────────────────────────────────┐
    │  status        LIVE → LIQUIDATED | RESOLVED | CLOSED │
    │  long_owner    pubkey                                │
    │  short_owner   pubkey                                │
@@ -138,7 +138,7 @@ except the status:
    │  collateral    c, locked from each side              │
    │  leverage      fixed for the life of the contract    │
    │  size          notional × 1e18 / entry               │
-   └────────────────────────────────────────────────────┘
+   └──────────────────────────────────────────────────────┘
 ```
 
 ## Intents and the order book
@@ -160,12 +160,12 @@ overlapping this long" in logarithmic time rather than by scanning.
 
 ```
    IntentBook account
-   ┌────────────────────────────────────────────────────┐
-   │ header   tree roots · free-list head · counters     │
-   ├────────────────────────────────────────────────────┤
+   ┌──────────────────────────────────────────────────────┐
+   │ header   tree roots · free-list head · counters      │
+   ├──────────────────────────────────────────────────────┤
    │ node 1 │ node 2 │ node 3 │ ........ │ node N         │
    │  each node, 96 B = intent | seat | free slot         │
-   └────────────────────────────────────────────────────┘
+   └──────────────────────────────────────────────────────┘
         long tree ─┐                  ┌─ short tree
                    ▼                  ▼
             (red-black, interval-augmented for overlap queries)
@@ -269,17 +269,17 @@ on.
 
 ```
    settlement transaction
-   ┌────────────────────────────────────────────────────┐
+   ┌─────────────────────────────────────────────────────┐
    │  ix[0]   Ed25519 precompile                         │
    │          verifies sig over the 104-byte attestation │
-   ├────────────────────────────────────────────────────┤
+   ├─────────────────────────────────────────────────────┤
    │  ix[1]   Liquidate / Resolve                        │
    │          reads ix[0] back from the instructions     │
    │          sysvar, and confirms:                      │
    │            program  == Ed25519 precompile           │
    │            signer   == registered attestor          │
    │            message  == this attestation             │
-   └────────────────────────────────────────────────────┘
+   └─────────────────────────────────────────────────────┘
 ```
 
 Freshness and replay are handled by a per-market nonce account. Each
@@ -409,11 +409,11 @@ number that matters.
                    =  $66,849.09 / $1,000,000  ×  1e18
                    =  66,849,092,182,260,000
 
-   ┌───────────────────────────────────────────────────────────┐
+   ┌────────────────────────────────────────────────────────────────┐
    │  0 ····························· price_fp ··············· 1e18 │
-   │                          ▲                                 │
-   │                  ≈ 0.0668, well inside (0, 1)               │
-   └───────────────────────────────────────────────────────────┘
+   │                          ▲                                     │
+   │                  ≈ 0.0668, well inside (0, 1)                  │
+   └────────────────────────────────────────────────────────────────┘
 ```
 
 It was not ready in another respect. The program validated that every
@@ -477,16 +477,16 @@ Underneath the tests sits the real program, not a model of it:
 
 ```
    polyleverage-simulator
-   ┌──────────────────────────────────────────────────────────┐
+   ┌───────────────────────────────────────────────────────────┐
    │  tests/     end-to-end · adversarial · perf · multi-asset │
-   ├──────────────────────────────────────────────────────────┤
+   ├───────────────────────────────────────────────────────────┤
    │  driver  ·  attestor  ·  scenario  ·  pricing             │
-   ├──────────────────────────────────────────────────────────┤
-   │  litesvm        in-process Solana VM, no validator,      │
-   │                 no network, clock set directly           │
-   ├──────────────────────────────────────────────────────────┤
+   ├───────────────────────────────────────────────────────────┤
+   │  litesvm        in-process Solana VM, no validator,       │
+   │                 no network, clock set directly            │
+   ├───────────────────────────────────────────────────────────┤
    │  polyleverage.so    real SBF bytecode (cargo build-sbf)   │
-   └──────────────────────────────────────────────────────────┘
+   └───────────────────────────────────────────────────────────┘
 ```
 
 The **driver** loads the program, derives addresses, funds accounts,
@@ -594,10 +594,10 @@ deposits to a settled, closed account:
       │ PostIntent (long)                              │ PostIntent (short)
       │  free → reserved                               │  free → reserved
       ▼                                                ▼
-   ┌──────────────────────────────────────────────────────┐
-   │              IntentBook   (per instrument)            │
+   ┌────────────────────────────────────────────────────────┐
+   │              IntentBook   (per instrument)             │
    │     long tree  ◄──────  matcher  ──────►  short tree   │
-   └───────────────────────────┬──────────────────────────┘
+   └───────────────────────────┬────────────────────────────┘
                                │  ranges overlap
                                │  both sides: reserved → locked
                                ▼
