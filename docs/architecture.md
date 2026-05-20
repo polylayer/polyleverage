@@ -581,6 +581,68 @@ creates the fee and volume accounts on first use, and allocates the
 position account. Everything else is well under seventeen thousand.
 The protocol has substantial headroom.
 
+## Orderbook performance
+
+The order book is the one part of the protocol whose cost depends on
+its size, so it is worth characterizing precisely rather than
+asserting. Two kinds of operation run against it. Overlap queries,
+which find the resting shorts that cross a given long, use the
+interval-augmented trees and run in `O(log n + k)`. Identity lookups,
+which find the node holding a given intent id, and the opportunistic
+prune that `PostIntent` performs, scan the node pool linearly.
+`MatchPair` resolves two intents by id, so it carries two such scans.
+
+A linear scan invites concern, so it was measured rather than
+assumed. The scaling benchmark grows a book to a target node capacity
+and meters `PostIntent` and `MatchPair` against it. The scan visits
+every slot in the pool, so the cost tracks the book's provisioned
+capacity rather than how many intents are currently resting.
+
+```
+   book capacity   PostIntent CU   MatchPair CU
+   ────────────────────────────────────────────
+              16           5,679         36,336
+              64           6,308         37,020
+             256          10,304         39,324
+           1,024          21,788         53,040
+           4,096          58,724         88,404
+           8,192         113,472        139,056
+   ────────────────────────────────────────────
+   MatchPair  ~  36,000 CU  +  12.6 CU per node
+```
+
+Both grow linearly, at roughly thirteen compute units per node, and
+the linear fit gives the ceilings directly. `MatchPair` stays within
+Solana's 200,000 CU default per-instruction limit up to a book of
+about 13,000 node slots. Raising the transaction's compute budget to
+the 1,400,000 CU maximum, which costs a single `ComputeBudget`
+instruction, extends that to about 105,000 slots. That is also near
+the point at which the book account reaches Solana's 10 MiB size cap,
+so the compute ceiling and the storage ceiling roughly coincide.
+
+In practice this is substantial headroom. The protocol shards by
+instrument: every (asset, leverage, bucket) is its own book account,
+processed independently. A single instrument would need on the order
+of 13,000 intents resting at once before matching even required a
+raised compute budget, which is far above realistic depth for one
+per-bucket market. Throughput across the protocol scales with the
+number of instruments, and that axis of scale costs nothing.
+
+One structural constraint shapes how a book is provisioned. Solana
+caps the growth of an account's data at about 10 KiB per transaction,
+so a book cannot be created deep in a single instruction. It is
+created small and grown with repeated `ExpandIntentBook` calls, each
+adding about a hundred slots. Provisioning a deep market is therefore
+a one-time sequence of expansion transactions.
+
+Should a single instrument ever need a book beyond these bounds, the
+linear scans are removable without touching the trees. A caller that
+has read the book already knows each intent's node index, so it can
+pass the index and let the program validate it against the intent id,
+turning the `O(n)` lookup into an `O(1)` array access and flattening
+`MatchPair` to its fixed base. The measurements indicate that change
+is not needed at any depth the protocol will realistically reach.
+
 ## The whole picture
 
 Flattened into one diagram, a position's life runs from two traders'
