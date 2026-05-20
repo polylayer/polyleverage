@@ -14,11 +14,12 @@ use solana_program::{
 use crate::{
     error::PolyleverageError,
     instruction::{CreateInstrumentArgs, ExpandIntentBookArgs},
-    seeds::{SEED_BOOK, SEED_BUCKET_REGISTRY, SEED_INSTRUMENT},
+    seeds::{SEED_BOOK, SEED_BUCKET_REGISTRY, SEED_INSTRUMENT, SEED_MARKET_NONCE},
     state::{
         init_intent_book, intent_book_byte_size, BookMut, BucketRegistry, FreeNode,
-        InstrumentConfig, ProgramConfig, DISC_BUCKET_REGISTRY, INSTRUMENT_CONFIG_LEN, NODE_SIZE,
-        NODE_TAG_FREE, STATUS_ACTIVE, STATUS_PAUSED,
+        InstrumentConfig, MarketNonceAccount, ProgramConfig, DISC_BUCKET_REGISTRY,
+        INSTRUMENT_CONFIG_LEN, MARKET_NONCE_LEN, NODE_SIZE, NODE_TAG_FREE, STATUS_ACTIVE,
+        STATUS_PAUSED,
     },
     utils::{assert_pda, assert_signer, assert_writable},
 };
@@ -30,6 +31,9 @@ use crate::{
 ///   3. `[writable]` intent book PDA (seeds [SEED_BOOK, instrument_config])
 ///   4. `[]` collateral mint
 ///   5. `[]` system program
+///   6. `[writable]` market nonce PDA (seeds [SEED_MARKET_NONCE, market_id]) —
+///      created here if absent; shared across all instruments on this market.
+///   7. (optional) `[]` bucket registry PDA
 pub fn process_create_instrument(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -42,11 +46,13 @@ pub fn process_create_instrument(
     let book_ai = next_account_info(iter)?;
     let mint = next_account_info(iter)?;
     let system_program = next_account_info(iter)?;
+    let market_nonce_ai = next_account_info(iter)?;
 
     assert_signer(admin)?;
     assert_writable(admin)?;
     assert_writable(instrument_ai)?;
     assert_writable(book_ai)?;
+    assert_writable(market_nonce_ai)?;
     if system_program.key != &solana_program::system_program::ID {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -198,14 +204,50 @@ pub fn process_create_instrument(
     drop(instr_data);
 
     // Initialize the intent book.
-    let mut book_data = book_ai.try_borrow_mut_data()?;
-    init_intent_book(
-        &mut book_data,
-        *instrument_ai.key,
-        args.initial_book_capacity,
-        book_bump,
-        0,
+    {
+        let mut book_data = book_ai.try_borrow_mut_data()?;
+        init_intent_book(
+            &mut book_data,
+            *instrument_ai.key,
+            args.initial_book_capacity,
+            book_bump,
+            0,
+        )?;
+    }
+
+    // Create the per-market nonce account if it does not yet exist. The
+    // nonce is keyed by `market_id` and shared across every instrument on
+    // that market, so creation is idempotent — a second instrument on the
+    // same market simply reuses the existing account. Settlement
+    // (Liquidate / Resolve / CloseMutual) requires this account; without
+    // a creation path those instructions would be unreachable.
+    let nonce_bump = assert_pda(
+        &[SEED_MARKET_NONCE, &args.market_id],
+        program_id,
+        market_nonce_ai.key,
     )?;
+    if market_nonce_ai.data_len() == 0 {
+        let nonce_lamports = rent.minimum_balance(MARKET_NONCE_LEN);
+        invoke_signed(
+            &system_instruction::create_account(
+                admin.key,
+                market_nonce_ai.key,
+                nonce_lamports,
+                MARKET_NONCE_LEN as u64,
+                program_id,
+            ),
+            &[
+                admin.clone(),
+                market_nonce_ai.clone(),
+                system_program.clone(),
+            ],
+            &[&[SEED_MARKET_NONCE, &args.market_id, &[nonce_bump]]],
+        )?;
+        let mut nonce_data = market_nonce_ai.try_borrow_mut_data()?;
+        MarketNonceAccount::init(&mut nonce_data, args.market_id, nonce_bump)?;
+    } else if market_nonce_ai.owner != program_id {
+        return Err(PolyleverageError::InvalidAccountOwner.into());
+    }
 
     Ok(())
 }
