@@ -238,6 +238,68 @@ cancellation path in between. The delay gives the system's users a
 window to observe a pending change to the most security-sensitive
 parameter in the program.
 
+## Exiting a position
+
+A PMLC has no fixed expiry. Once matched it stays live until it
+settles, and the settlement paths above (liquidation, resolution,
+mutual close) are one way it ends. But a trader rarely wants to wait
+for the underlying market to resolve. Three mechanisms let an owner
+leave a live position early.
+
+The simplest is **mutual close**: both owners of a PMLC agree to tear
+it down, and each takes back collateral adjusted by the position's
+current mark.
+
+**Novation** transfers one side of a PMLC to a named new owner. The
+exiting owner's collateral unlocks, the new owner's collateral locks
+in, and the new owner inherits the position at its original entry
+price. Novation needs a specific counterparty who has agreed to take
+the position over.
+
+The most important of the three, because it does not need a named
+counterparty, is **substitution**. It is how a trader exits into the
+open market, and it reuses machinery the trader already understands.
+To leave a long position, the owner does exactly what they would do
+to open a short from scratch: they post a short intent. The intent
+rests in the same order book as every other intent. When the matcher
+finds a new trader whose long intent overlaps it, the substitution
+instruction fires. The crucial point is that it does not open a
+second PMLC. It swaps the exiting owner out of their existing PMLC
+and swaps the new trader in.
+
+```
+before:  PMLC = (long: Alice, short: Bob)
+
+         Alice posts a short intent ─┐
+                                     ├─ matched in the order book
+         Carol posts a long intent ─┘
+                                     ▼
+after:   PMLC = (long: Carol, short: Bob)
+
+         Alice's collateral c unlocks back to free
+         Carol's collateral c locks in
+         Bob, the untouched side, is unaffected
+```
+
+Substitution can settle the exiting owner's profit on-chain. The
+position has an entry price `e1`; the substituting match has its own
+midpoint `e2`. In the settling variant, the new trader pays the
+exiting owner a premium equal to the owner's mark-to-market profit
+between `e1` and `e2`. The exiting owner walks away with their
+collateral plus realized profit, or minus realized loss; the new
+trader holds a position whose on-chain entry is still `e1` but whose
+economic entry, after the premium, is `e2`. The counterparty on the
+other side of the PMLC is not touched: only owners change, and the
+bilateral collateral sum is preserved throughout.
+
+Because an exit is just an ordinary intent in the same book as an
+entry, exiting and entering are the same action viewed from two
+sides, and a position can be rolled rather than simply unwound. An
+intent can additionally carry a reentry flag, which is recorded on
+the PMLC it matches into; when that PMLC later closes, the flagged
+side can re-post an intent at the saved range without a fresh signed
+action, so a closing position can roll directly into the next one.
+
 ## From prediction markets to equities and commodities
 
 Polyleverage began on prediction markets, where a price is a

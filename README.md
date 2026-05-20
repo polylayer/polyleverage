@@ -19,7 +19,7 @@ as well as equities, commodities, and crypto majors priced off Pyth.
 
 The protocol design, the settlement model, and the testing approach
 are described in **[The Polyleverage Protocol
-Architecture](docs/the-polyleverage-protocol-architecture.md)**.
+Architecture](docs/architecture.md)**.
 
 ## Build and test
 
@@ -38,9 +38,17 @@ program into an in-process VM and drives it with a simulated attestor.
 
 ## Program ID
 
-`6Fvi3dGdQkBP8HHZFt3e42RJUKtzmfM4wHkCXVjiYyqv`
+The crate is built against the address
+`6Fvi3dGdQkBP8HHZFt3e42RJUKtzmfM4wHkCXVjiYyqv`, declared at compile
+time via `declare_id!`. A Solana program needs to know its own
+address to derive program-derived addresses, so the ID is fixed in
+source rather than discovered at deploy time.
 
-The program keypair is not contained in this repository.
+This address is the public key of a development keypair. It is the
+address the program would occupy once deployed; it is not a claim
+that the program is deployed. The keypair is not contained in this
+repository and is expected to be regenerated before any mainnet
+deployment.
 
 ## Repo layout
 
