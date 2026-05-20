@@ -12,8 +12,11 @@ pub const STATUS_ACTIVE: u8 = 0;
 pub const STATUS_PAUSED: u8 = 1;
 pub const STATUS_CLOSED: u8 = 2;
 
-/// Allowed leverage values. Keep in sync with UI.
-pub const ALLOWED_LEVERAGE_BPS: &[u32] = &[20_000, 50_000, 100_000, 200_000, 400_000];
+/// Allowed leverage values (bps). Keep in sync with UI.
+/// 2x / 5x / 10x / 20x / 40x / 100x / 250x / 1000x.
+pub const ALLOWED_LEVERAGE_BPS: &[u32] = &[
+    20_000, 50_000, 100_000, 200_000, 400_000, 1_000_000, 2_500_000, 10_000_000,
+];
 
 /// Market-data source. The on-chain program treats `market_id` and the
 /// two `source_token_id_*` fields as opaque blobs; the attestor (which
@@ -28,11 +31,18 @@ pub mod source {
     //   pub const KALSHI:   u8 = 1;
     //   pub const MANIFOLD: u8 = 2;
 
+    /// Pyth-priced synthetic instrument (equities / commodities /
+    /// crypto majors). `market_id` carries the 32-byte Pyth feed id.
+    /// The attestor sources prices from Pyth Benchmarks and normalizes
+    /// them into the program's `(0, 1)` fixed-point — see
+    /// `docs/internal/POLYLEVERAGE_MULTIASSET.md`.
+    pub const PYTH: u8 = 3;
+
     /// Returns true iff the `s` byte names a source the on-chain program
     /// recognizes. Off-chain attestors enforce their own (possibly
     /// stricter) allow-list.
     pub fn is_known(s: u8) -> bool {
-        matches!(s, POLYMARKET)
+        matches!(s, POLYMARKET | PYTH)
     }
 }
 
