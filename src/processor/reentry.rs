@@ -78,29 +78,22 @@ pub fn process_claim_reentry(
     }
 
     // --- Load + validate PMLC ---
-    let (
-        required_owner,
-        reentry_min_fp,
-        reentry_max_fp,
-        reentry_flag_mask,
-        instrument_key,
-        collateral_mint,
-    ) = {
+    let (required_owner, reentry_price_fp, reentry_flag_mask, instrument_key, collateral_mint) = {
         let data = pmlc_ai.try_borrow_data()?;
         let p = Pmlc::load(&data)?;
         // Must be closed; live PMLCs can't reenter.
         if p.status == crate::state::PMLC_STATUS_LIVE {
             return Err(PolyleverageError::PmlcNotLive.into()); // misnomer; reusing existing code
         }
-        let (expected_owner, range, mask) = match args.side {
+        let (expected_owner, price, mask) = match args.side {
             SIDE_LONG => (
                 p.long_owner,
-                (p.long_reentry_min_fp, p.long_reentry_max_fp),
+                p.long_reentry_price_fp,
                 PMLC_FLAG_LONG_REENTRY,
             ),
             SIDE_SHORT => (
                 p.short_owner,
-                (p.short_reentry_min_fp, p.short_reentry_max_fp),
+                p.short_reentry_price_fp,
                 PMLC_FLAG_SHORT_REENTRY,
             ),
             _ => return Err(PolyleverageError::InvalidPmlcSide.into()),
@@ -109,14 +102,7 @@ pub fn process_claim_reentry(
             // Reentry flag was never set for this side, or already consumed.
             return Err(PolyleverageError::InvalidPmlcSide.into());
         }
-        (
-            expected_owner,
-            range.0,
-            range.1,
-            mask,
-            p.instrument,
-            p.collateral_mint,
-        )
+        (expected_owner, price, mask, p.instrument, p.collateral_mint)
     };
     if required_owner != *owner.key {
         return Err(PolyleverageError::MissingSigner.into());
@@ -145,7 +131,7 @@ pub fn process_claim_reentry(
         return Err(PolyleverageError::InvalidPda.into());
     }
 
-    math::validate_range(reentry_min_fp, reentry_max_fp, tick_fp)?;
+    math::validate_price_ticked(reentry_price_fp, tick_fp)?;
     if args.expiration_slot <= Clock::get()?.slot {
         return Err(PolyleverageError::IntentExpired.into());
     }
@@ -255,9 +241,8 @@ pub fn process_claim_reentry(
             right: NULL_IDX,
             parent: NULL_IDX,
             _pad0: [0; 2],
-            min_price_fp: reentry_min_fp,
-            max_price_fp: reentry_max_fp,
-            subtree_max_fp: reentry_max_fp,
+            price_fp: reentry_price_fp,
+            _pad1: [0; 2],
             id: intent_id,
             owner_seat: seat_idx,
             contracts_total: new_contracts,

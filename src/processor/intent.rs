@@ -232,7 +232,7 @@ fn do_post_intent_inner<'a, 'b>(
     if args.contracts == 0 {
         return Err(PolyleverageError::InvalidContractCount.into());
     }
-    math::validate_range(args.min_price_fp, args.max_price_fp, tick_fp)?;
+    math::validate_price_ticked(args.price_fp, tick_fp)?;
     let now = solana_program::clock::Clock::get()?.slot;
     if args.expiration_slot <= now {
         return Err(PolyleverageError::IntentExpired.into());
@@ -376,9 +376,8 @@ fn do_post_intent_inner<'a, 'b>(
         right: NULL_IDX,
         parent: NULL_IDX,
         _pad0: [0; 2],
-        min_price_fp: args.min_price_fp,
-        max_price_fp: args.max_price_fp,
-        subtree_max_fp: args.max_price_fp,
+        price_fp: args.price_fp,
+        _pad1: [0; 2],
         id: intent_id,
         owner_seat: seat_idx,
         contracts_total: args.contracts,
@@ -438,14 +437,7 @@ fn do_post_intent_inner<'a, 'b>(
             let counterparty_id = {
                 let mut data = book_ai.try_borrow_mut_data()?;
                 let book = BookMut::load(&mut data)?;
-                find_overlap_on_side(
-                    &book,
-                    opposite_side,
-                    args.min_price_fp,
-                    args.max_price_fp,
-                    now_slot,
-                    intent_id,
-                )?
+                find_overlap_on_side(&book, opposite_side, args.price_fp, now_slot, intent_id)?
             };
 
             if let Some(cp_id) = counterparty_id {

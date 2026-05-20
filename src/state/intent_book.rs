@@ -79,7 +79,7 @@ const_assert_size!(IntentBookHeader, INTENT_BOOK_HEADER_LEN);
 // Node variants (all occupy `NODE_SIZE` bytes)
 // ---------------------------------------------------------------------------
 
-/// Intent / order node (RB + interval tree augmented).
+/// Intent / order node — a single-price limit order in the RB tree.
 ///
 /// Layout is 96 bytes with natural 8-byte alignment (no injected padding).
 /// Offsets:
@@ -87,7 +87,7 @@ const_assert_size!(IntentBookHeader, INTENT_BOOK_HEADER_LEN);
 ///   0:  tag, side, color, flags (4 × u8)
 ///   4:  left, right, parent (3 × u32)
 ///  16:  _pad0 [u32; 2]   -- 8 bytes so next u64 is 8-aligned
-///  24:  min_price_fp, max_price_fp, subtree_max_fp (3 × u64)
+///  24:  price_fp (u64), _pad1 [u64; 2]
 ///  48:  id (u64)
 ///  56:  owner_seat (u32), contracts_total, contracts_remaining (2 × u16)
 ///  64:  expiration_slot, post_seq (2 × u64)
@@ -106,9 +106,10 @@ pub struct IntentNode {
     pub parent: u32,
     pub _pad0: [u32; 2],
 
-    pub min_price_fp: u64,
-    pub max_price_fp: u64,
-    pub subtree_max_fp: u64,
+    /// Limit price (18-decimal fixed point). A long crosses a short iff
+    /// `long.price_fp >= short.price_fp`.
+    pub price_fp: u64,
+    pub _pad1: [u64; 2],
 
     pub id: u64,
     pub owner_seat: u32,

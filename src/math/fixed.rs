@@ -21,46 +21,23 @@ pub fn validate_price(price_fp: u64) -> Result<(), ProgramError> {
     Ok(())
 }
 
-/// Both endpoints of an entry range are tick-aligned and `min <= max`.
-pub fn validate_range(min_fp: u64, max_fp: u64, tick_fp: u64) -> Result<(), ProgramError> {
-    validate_price(min_fp)?;
-    validate_price(max_fp)?;
-    if min_fp > max_fp {
-        return Err(PolyleverageError::InvalidPriceRange.into());
-    }
-    if tick_fp == 0 {
-        return Err(PolyleverageError::PriceNotTickAligned.into());
-    }
-    if min_fp % tick_fp != 0 || max_fp % tick_fp != 0 {
+/// A limit price is in `(0, 1e18)` and aligned to `tick_fp`.
+pub fn validate_price_ticked(price_fp: u64, tick_fp: u64) -> Result<(), ProgramError> {
+    validate_price(price_fp)?;
+    if tick_fp == 0 || price_fp % tick_fp != 0 {
         return Err(PolyleverageError::PriceNotTickAligned.into());
     }
     Ok(())
 }
 
-// --- Overlap / match --------------------------------------------------------
+// --- Match ------------------------------------------------------------------
 
-/// Return `(overlap_min, overlap_max)` or `None` if ranges don't overlap.
+/// Midpoint of two limit prices — the PMLC entry when a long and a short
+/// cross. Symmetric in its arguments.
 #[inline]
-pub fn range_overlap(
-    long_min: u64,
-    long_max: u64,
-    short_min: u64,
-    short_max: u64,
-) -> Option<(u64, u64)> {
-    let lo = long_min.max(short_min);
-    let hi = long_max.min(short_max);
-    if lo <= hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
-}
-
-/// Midpoint of a valid overlap — the PMLC entry price.
-#[inline]
-pub fn overlap_midpoint(lo: u64, hi: u64) -> u64 {
-    // lo and hi are both <= PRICE_ONE < 2^60, safe to add as u64.
-    (lo / 2) + (hi / 2) + ((lo & 1) & (hi & 1))
+pub fn price_midpoint(a: u64, b: u64) -> u64 {
+    // a and b are both < PRICE_ONE < 2^60, safe to add as u64.
+    (a / 2) + (b / 2) + ((a & 1) & (b & 1))
 }
 
 // --- Notional / size --------------------------------------------------------
@@ -121,34 +98,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_range() {
+    fn test_validate_price_ticked() {
         // tick = 0.01 = 1e16
         let tick = 10_000_000_000_000_000_u64;
-        assert!(validate_range(tick, 2 * tick, tick).is_ok());
-        assert!(validate_range(tick + 1, 2 * tick, tick).is_err()); // not aligned
-        assert!(validate_range(2 * tick, tick, tick).is_err()); // min > max
+        assert!(validate_price_ticked(tick, tick).is_ok());
+        assert!(validate_price_ticked(2 * tick, tick).is_ok());
+        assert!(validate_price_ticked(tick + 1, tick).is_err()); // not aligned
+        assert!(validate_price_ticked(0, tick).is_err()); // out of range
+        assert!(validate_price_ticked(tick, 0).is_err()); // zero tick
     }
 
     #[test]
-    fn test_overlap() {
-        // Long [0.58, 0.61], Short [0.60, 0.63] → [0.60, 0.61]
-        let lo = 580_000_000_000_000_000_u64;
-        let hi = 630_000_000_000_000_000_u64;
-        let (omin, omax) = range_overlap(lo, 610_000_000_000_000_000, 600_000_000_000_000_000, hi)
-            .expect("should overlap");
-        assert_eq!(omin, 600_000_000_000_000_000);
-        assert_eq!(omax, 610_000_000_000_000_000);
-    }
-
-    #[test]
-    fn test_no_overlap() {
-        assert!(range_overlap(100, 200, 300, 400).is_none());
-    }
-
-    #[test]
-    fn test_midpoint() {
-        let m = overlap_midpoint(600_000_000_000_000_000, 610_000_000_000_000_000);
+    fn test_price_midpoint() {
+        let m = price_midpoint(600_000_000_000_000_000, 610_000_000_000_000_000);
         assert_eq!(m, 605_000_000_000_000_000);
+        // Symmetric in argument order.
+        assert_eq!(price_midpoint(610, 600), price_midpoint(600, 610));
+        // Odd sum rounds down by at most 1.
+        assert_eq!(price_midpoint(3, 4), 3);
     }
 
     #[test]

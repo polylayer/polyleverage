@@ -1,10 +1,14 @@
-//! Interval-augmented red-black tree over `IntentNode`s in the book node pool.
+//! Price-sorted red-black tree over `IntentNode`s in the book node pool —
+//! one tree per side, forming a standard single-price limit order book.
 //!
-//! Ordering key: `(min_price_fp ASC, post_seq ASC, id ASC)` — deterministic, FIFO tiebreak.
-//! Augmentation: `subtree_max_fp = max(self.max_price_fp, left.subtree_max, right.subtree_max)`.
+//! Ordering key: `(price, post_seq ASC, id ASC)`. The price direction is
+//! **side-aware**: the long (bid) tree sorts price-descending and the short
+//! (ask) tree sorts price-ascending, so a plain in-order traversal of either
+//! tree yields the most aggressive order first, with FIFO tiebreak. The
+//! matcher relies on this via `for_each_best_first` / `first_live`.
 //!
-//! All operations take a `&mut BookMut<'_>` and a `Side` tag selecting which root to use.
-//! Node index `0` is the null sentinel.
+//! All operations take a `&mut BookMut<'_>` and a `Side` tag selecting which
+//! root to use. Node index `0` is the null sentinel.
 
 use solana_program::program_error::ProgramError;
 
@@ -12,11 +16,18 @@ use crate::error::PolyleverageError;
 
 use super::intent_book::{BookMut, IntentNode, NULL_IDX, RB_BLACK, RB_RED, SIDE_LONG, SIDE_SHORT};
 
-/// Order key: (min_price_fp, post_seq, id). Returns `Ordering` as i8 (-1, 0, 1).
+/// Order key: `(price, post_seq, id)`. Longs sort price-descending so the
+/// highest bid is leftmost; shorts sort price-ascending so the lowest ask is
+/// leftmost. In-order traversal of either tree is therefore best-first.
 #[inline]
-fn cmp_key(a: &IntentNode, b: &IntentNode) -> core::cmp::Ordering {
+fn cmp_key(side: u8, a: &IntentNode, b: &IntentNode) -> core::cmp::Ordering {
     use core::cmp::Ordering::*;
-    match a.min_price_fp.cmp(&b.min_price_fp) {
+    let price = if side == SIDE_LONG {
+        b.price_fp.cmp(&a.price_fp)
+    } else {
+        a.price_fp.cmp(&b.price_fp)
+    };
+    match price {
         Equal => match a.post_seq.cmp(&b.post_seq) {
             Equal => a.id.cmp(&b.id),
             other => other,
@@ -118,44 +129,8 @@ fn set_color(book: &mut BookMut, idx: u32, c: u8) -> Result<(), ProgramError> {
     Ok(())
 }
 
-// --- Augmentation maintenance ----------------------------------------------
-
-/// Recompute `subtree_max_fp` for node `idx` from its children's cached values.
-#[inline]
-fn recompute_augment(book: &mut BookMut, idx: u32) -> Result<(), ProgramError> {
-    if idx == NULL_IDX {
-        return Ok(());
-    }
-    let left = get_left(book, idx)?;
-    let right = get_right(book, idx)?;
-    let self_max = book.intent(idx)?.max_price_fp;
-    let left_max = if left == NULL_IDX {
-        0
-    } else {
-        book.intent(left)?.subtree_max_fp
-    };
-    let right_max = if right == NULL_IDX {
-        0
-    } else {
-        book.intent(right)?.subtree_max_fp
-    };
-    let new_max = self_max.max(left_max).max(right_max);
-    book.intent_mut(idx)?.subtree_max_fp = new_max;
-    Ok(())
-}
-
-/// Walk from `idx` up to the root, recomputing `subtree_max_fp` at each ancestor.
-#[inline]
-fn fix_augment_up(book: &mut BookMut, mut idx: u32) -> Result<(), ProgramError> {
-    while idx != NULL_IDX {
-        recompute_augment(book, idx)?;
-        idx = get_parent(book, idx)?;
-    }
-    Ok(())
-}
-
 // --- Rotations --------------------------------------------------------------
-// Standard RB rotations. Update augmentation at rotated nodes.
+// Standard RB rotations.
 
 fn rotate_left(book: &mut BookMut, side: u8, x: u32) -> Result<(), ProgramError> {
     let y = get_right(book, x)?;
@@ -180,9 +155,6 @@ fn rotate_left(book: &mut BookMut, side: u8, x: u32) -> Result<(), ProgramError>
     }
     set_left(book, y, x)?;
     set_parent(book, x, y)?;
-    // Augmentation: x is now below y; recompute x then y.
-    recompute_augment(book, x)?;
-    recompute_augment(book, y)?;
     Ok(())
 }
 
@@ -209,15 +181,14 @@ fn rotate_right(book: &mut BookMut, side: u8, x: u32) -> Result<(), ProgramError
     }
     set_right(book, y, x)?;
     set_parent(book, x, y)?;
-    recompute_augment(book, x)?;
-    recompute_augment(book, y)?;
     Ok(())
 }
 
 // --- Insert ----------------------------------------------------------------
 
-/// Insert node at `idx` into the `side` tree. The node must already be populated
-/// (min/max/seq/id/etc) and have `left = right = parent = 0`, `color = RED`.
+/// Insert node at `idx` into the `side` tree. The node must already be
+/// populated (price/seq/id/etc) and have `left = right = parent = 0`,
+/// `color = RED`.
 pub fn insert(book: &mut BookMut, side: u8, idx: u32) -> Result<(), ProgramError> {
     if idx == NULL_IDX {
         return Err(ProgramError::InvalidAccountData);
@@ -230,14 +201,12 @@ pub fn insert(book: &mut BookMut, side: u8, idx: u32) -> Result<(), ProgramError
         n.right = NULL_IDX;
         n.parent = NULL_IDX;
         n.color = RB_RED;
-        n.subtree_max_fp = n.max_price_fp;
     }
 
     let mut root = tree_root(book, side)?;
     if root == NULL_IDX {
         // Empty tree: new node is root, colored BLACK.
         set_color(book, idx, RB_BLACK)?;
-        recompute_augment(book, idx)?;
         set_tree_root(book, side, idx)?;
         return Ok(());
     }
@@ -251,7 +220,7 @@ pub fn insert(book: &mut BookMut, side: u8, idx: u32) -> Result<(), ProgramError
         let ord = {
             let a = book.intent(idx)?;
             let b = book.intent(root)?;
-            cmp_key(a, b)
+            cmp_key(side, a, b)
         };
         match ord {
             core::cmp::Ordering::Less => {
@@ -278,9 +247,6 @@ pub fn insert(book: &mut BookMut, side: u8, idx: u32) -> Result<(), ProgramError
     } else {
         set_right(book, parent, idx)?;
     }
-
-    // Fix augmentation along the path from idx upward.
-    fix_augment_up(book, idx)?;
 
     // RB insert-fixup.
     insert_fixup(book, side, idx)?;
@@ -426,9 +392,6 @@ pub fn remove(book: &mut BookMut, side: u8, z: u32) -> Result<(), ProgramError> 
         set_color(book, y, z_color)?;
     }
 
-    // Fix augmentation upward starting from x's parent.
-    fix_augment_up(book, x_parent)?;
-
     if y_original_color == RB_BLACK {
         remove_fixup(book, side, x, x_parent)?;
     }
@@ -512,16 +475,17 @@ fn remove_fixup(
     Ok(())
 }
 
-// --- Range-point query -----------------------------------------------------
+// --- Best-first traversal --------------------------------------------------
 
-/// Visit every intent whose interval `[min, max]` contains `point_fp`.
-/// Traversal is in-order (sorted by key) subject to augmentation pruning.
+/// Visit every intent on `side` in best-first order — most aggressive price
+/// first, FIFO within a price level. This is a plain in-order traversal; the
+/// side-aware key (see `cmp_key`) makes in-order equal best-first.
 ///
-/// `visitor` returns `true` to continue or `false` to stop early.
-pub fn for_each_containing<F>(
+/// `visitor` returns `true` to continue or `false` to stop early. `O(log n)`
+/// to reach the best order, `O(k)` to visit `k` of them.
+pub fn for_each_best_first<F>(
     book: &BookMut,
     side: u8,
-    point_fp: u64,
     mut visitor: F,
 ) -> Result<(), ProgramError>
 where
@@ -531,21 +495,15 @@ where
     if root == NULL_IDX {
         return Ok(());
     }
-    // Iterative stack-based walk. Using fixed-size stack avoids heap allocation.
-    // RB-tree depth is at most 2·log2(n); for 1M nodes that's 40. 64 is comfortable.
+    // Iterative stack-based in-order walk. Fixed-size stack avoids heap
+    // allocation; RB-tree depth is at most 2·log2(n) — 64 is comfortable.
     const STACK_CAP: usize = 64;
     let mut stack: [u32; STACK_CAP] = [NULL_IDX; STACK_CAP];
     let mut sp: usize = 0;
     let mut cur = root;
 
     loop {
-        // Traverse left as far as possible.
         while cur != NULL_IDX {
-            // Prune: if point_fp > subtree_max, nothing in this subtree intersects.
-            let sm = book.intent(cur)?.subtree_max_fp;
-            if point_fp > sm {
-                break;
-            }
             if sp >= STACK_CAP {
                 return Err(PolyleverageError::ArithmeticOverflow.into());
             }
@@ -559,108 +517,31 @@ where
         sp -= 1;
         let top = stack[sp];
         let node = book.intent(top)?;
-        if node.min_price_fp <= point_fp && point_fp <= node.max_price_fp {
-            let cont = visitor(top, node);
-            if !cont {
-                return Ok(());
-            }
+        if !visitor(top, node) {
+            return Ok(());
         }
-        // Only descend right if right subtree could contain the point.
-        if point_fp >= node.min_price_fp {
-            cur = node.right;
-        } else {
-            cur = NULL_IDX;
-        }
+        cur = node.right;
     }
     Ok(())
 }
 
-/// Shortcut: return the first (leftmost in-order) intent containing `point_fp` with
-/// positive `contracts_remaining`. Returns `(idx, node_copy)` or `None`.
-pub fn first_active_containing(
+/// Return the best-priced live intent on `side` — positive
+/// `contracts_remaining` and not expired. `(idx, node_copy)` or `None`.
+pub fn first_live(
     book: &BookMut,
     side: u8,
-    point_fp: u64,
+    now_slot: u64,
 ) -> Result<Option<(u32, IntentNode)>, ProgramError> {
     let mut found: Option<(u32, IntentNode)> = None;
-    for_each_containing(book, side, point_fp, |idx, node| {
-        if node.contracts_remaining > 0 {
+    for_each_best_first(book, side, |idx, node| {
+        if node.contracts_remaining > 0 && node.expiration_slot > now_slot {
             found = Some((idx, *node));
-            false // stop iterating
+            false // stop — first one reached is the best price
         } else {
             true
         }
     })?;
     Ok(found)
-}
-
-// --- Range-overlap query ---------------------------------------------------
-
-/// Visit every intent whose interval `[min, max]` overlaps the query interval
-/// `[q_min, q_max]`. Two intervals overlap iff `min <= q_max && max >= q_min`.
-/// Traversal is in-order (sorted by key) subject to augmentation pruning.
-///
-/// Unlike two point queries at the query endpoints, this is a *complete*
-/// overlap query: it also returns intervals nested strictly inside
-/// `[q_min, q_max]`, which contain neither endpoint. `O(log n + k)`.
-///
-/// `visitor` returns `true` to continue or `false` to stop early.
-pub fn for_each_overlapping<F>(
-    book: &BookMut,
-    side: u8,
-    q_min: u64,
-    q_max: u64,
-    mut visitor: F,
-) -> Result<(), ProgramError>
-where
-    F: FnMut(u32, &IntentNode) -> bool,
-{
-    let root = tree_root(book, side)?;
-    if root == NULL_IDX {
-        return Ok(());
-    }
-    const STACK_CAP: usize = 64;
-    let mut stack: [u32; STACK_CAP] = [NULL_IDX; STACK_CAP];
-    let mut sp: usize = 0;
-    let mut cur = root;
-
-    loop {
-        // Descend left as far as possible.
-        while cur != NULL_IDX {
-            // Prune: if every interval in this subtree ends before q_min,
-            // none can overlap `[q_min, q_max]`.
-            let sm = book.intent(cur)?.subtree_max_fp;
-            if sm < q_min {
-                break;
-            }
-            if sp >= STACK_CAP {
-                return Err(PolyleverageError::ArithmeticOverflow.into());
-            }
-            stack[sp] = cur;
-            sp += 1;
-            cur = get_left(book, cur)?;
-        }
-        if sp == 0 {
-            break;
-        }
-        sp -= 1;
-        let top = stack[sp];
-        let node = book.intent(top)?;
-        if node.min_price_fp <= q_max && node.max_price_fp >= q_min {
-            if !visitor(top, node) {
-                return Ok(());
-            }
-        }
-        // The tree is keyed by min, so the right subtree's intervals all
-        // have min >= this node's. If this node's min already exceeds
-        // q_max, none of them can overlap.
-        if node.min_price_fp <= q_max {
-            cur = node.right;
-        } else {
-            cur = NULL_IDX;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -678,7 +559,7 @@ mod tests {
         buf
     }
 
-    fn mk_intent(side: u8, min: u64, max: u64, seq: u64, id: u64) -> IntentNode {
+    fn mk_intent(side: u8, price: u64, seq: u64, id: u64) -> IntentNode {
         IntentNode {
             tag: NODE_TAG_INTENT,
             side,
@@ -688,9 +569,8 @@ mod tests {
             right: NULL_IDX,
             parent: NULL_IDX,
             _pad0: [0; 2],
-            min_price_fp: min,
-            max_price_fp: max,
-            subtree_max_fp: max,
+            price_fp: price,
+            _pad1: [0; 2],
             id,
             owner_seat: 1,
             contracts_total: 1,
@@ -702,256 +582,153 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_single_insert_and_query() {
-        let mut buf = mk_book(64);
-        let mut book = BookMut::load(&mut buf).unwrap();
-
+    /// Insert an intent and return its node index.
+    fn put(book: &mut BookMut, side: u8, price: u64, seq: u64, id: u64) -> u32 {
         let idx = book.alloc_node().unwrap();
-        let node = mk_intent(SIDE_LONG, 500, 600, 1, 1);
-        book.write_intent(idx, node).unwrap();
+        book.write_intent(idx, mk_intent(side, price, seq, id)).unwrap();
+        insert(book, side, idx).unwrap();
+        idx
+    }
 
-        insert(&mut book, SIDE_LONG, idx).unwrap();
+    /// Collect `(idx, price, post_seq)` in best-first order.
+    fn best_first(book: &BookMut, side: u8) -> Vec<(u32, u64, u64)> {
+        let mut out = Vec::new();
+        for_each_best_first(book, side, |idx, n| {
+            out.push((idx, n.price_fp, n.post_seq));
+            true
+        })
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn test_single_insert() {
+        let mut buf = mk_book(64);
+        let mut book = BookMut::load(&mut buf).unwrap();
+        let idx = put(&mut book, SIDE_LONG, 500, 1, 1);
         assert_eq!(book.header.long_tree_root, idx);
-
-        // Root must be black post-insert.
         assert_eq!(get_color(&book, idx).unwrap(), RB_BLACK);
-
-        // Point in range.
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 550, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert_eq!(hits, vec![idx]);
-
-        // Point out of range.
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 400, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert!(hits.is_empty());
+        assert_eq!(best_first(&book, SIDE_LONG), vec![(idx, 500, 1)]);
     }
 
     #[test]
-    fn test_many_inserts_and_in_order() {
-        let mut buf = mk_book(256);
+    fn test_best_first_long_descending() {
+        let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-
-        // Insert intents with various min_price_fp in shuffled order.
-        let seqs: [u64; 10] = [50, 10, 30, 70, 20, 40, 60, 80, 90, 100];
-        let mut indices = Vec::new();
-        for (i, &seq) in seqs.iter().enumerate() {
-            let idx = book.alloc_node().unwrap();
-            let node = mk_intent(SIDE_LONG, seq * 10, seq * 10 + 5, seq, (i + 1) as u64);
-            book.write_intent(idx, node).unwrap();
-            insert(&mut book, SIDE_LONG, idx).unwrap();
-            indices.push((seq, idx));
+        // Insert in shuffled price order; best-first must yield highest first.
+        for (seq, price) in [(1, 300u64), (2, 100), (3, 500), (4, 200), (5, 400)] {
+            put(&mut book, SIDE_LONG, price, seq, seq);
         }
-        indices.sort_by_key(|(s, _)| *s);
+        let prices: Vec<u64> = best_first(&book, SIDE_LONG).iter().map(|t| t.1).collect();
+        assert_eq!(prices, vec![500, 400, 300, 200, 100]);
+    }
 
-        // Stab each and we should find exactly one.
-        for &(seq, idx) in &indices {
-            let mut found = None;
-            for_each_containing(&book, SIDE_LONG, seq * 10 + 2, |i, _| {
-                found = Some(i);
-                false
-            })
-            .unwrap();
-            assert_eq!(found, Some(idx));
+    #[test]
+    fn test_best_first_short_ascending() {
+        let mut buf = mk_book(64);
+        let mut book = BookMut::load(&mut buf).unwrap();
+        for (seq, price) in [(1, 300u64), (2, 100), (3, 500), (4, 200), (5, 400)] {
+            put(&mut book, SIDE_SHORT, price, seq, seq);
         }
+        let prices: Vec<u64> = best_first(&book, SIDE_SHORT).iter().map(|t| t.1).collect();
+        assert_eq!(prices, vec![100, 200, 300, 400, 500]);
     }
 
     #[test]
-    fn test_remove_preserves_others() {
+    fn test_fifo_within_price_level() {
         let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-
-        let a = book.alloc_node().unwrap();
-        let b = book.alloc_node().unwrap();
-        let c = book.alloc_node().unwrap();
-        book.write_intent(a, mk_intent(SIDE_LONG, 100, 200, 1, 1))
-            .unwrap();
-        book.write_intent(b, mk_intent(SIDE_LONG, 300, 400, 2, 2))
-            .unwrap();
-        book.write_intent(c, mk_intent(SIDE_LONG, 500, 600, 3, 3))
-            .unwrap();
-
-        insert(&mut book, SIDE_LONG, a).unwrap();
-        insert(&mut book, SIDE_LONG, b).unwrap();
-        insert(&mut book, SIDE_LONG, c).unwrap();
-
-        // Remove middle.
-        remove(&mut book, SIDE_LONG, b).unwrap();
-
-        // Search for point in removed interval: no hits.
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 350, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert!(hits.is_empty());
-
-        // Remaining intervals still findable.
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 150, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert_eq!(hits, vec![a]);
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 550, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert_eq!(hits, vec![c]);
+        // Three longs at the same price, posted seq 7, 3, 9.
+        put(&mut book, SIDE_LONG, 500, 7, 1);
+        put(&mut book, SIDE_LONG, 500, 3, 2);
+        put(&mut book, SIDE_LONG, 500, 9, 3);
+        let seqs: Vec<u64> = best_first(&book, SIDE_LONG).iter().map(|t| t.2).collect();
+        // Same price → FIFO by post_seq.
+        assert_eq!(seqs, vec![3, 7, 9]);
     }
 
     #[test]
-    fn test_overlapping_intervals_multiple_hits() {
+    fn test_remove_preserves_order() {
         let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-
-        // Three intervals all containing point 500.
-        let a = book.alloc_node().unwrap();
-        let b = book.alloc_node().unwrap();
-        let c = book.alloc_node().unwrap();
-        book.write_intent(a, mk_intent(SIDE_LONG, 100, 600, 1, 1))
-            .unwrap();
-        book.write_intent(b, mk_intent(SIDE_LONG, 300, 700, 2, 2))
-            .unwrap();
-        book.write_intent(c, mk_intent(SIDE_LONG, 450, 550, 3, 3))
-            .unwrap();
-
-        insert(&mut book, SIDE_LONG, a).unwrap();
-        insert(&mut book, SIDE_LONG, b).unwrap();
-        insert(&mut book, SIDE_LONG, c).unwrap();
-
-        let mut hits = Vec::new();
-        for_each_containing(&book, SIDE_LONG, 500, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        // Should contain all three in sorted order by min_price_fp.
-        assert_eq!(hits, vec![a, b, c]);
+        let a = put(&mut book, SIDE_SHORT, 100, 1, 1);
+        let b = put(&mut book, SIDE_SHORT, 300, 2, 2);
+        let c = put(&mut book, SIDE_SHORT, 500, 3, 3);
+        remove(&mut book, SIDE_SHORT, b).unwrap();
+        let idxs: Vec<u32> = best_first(&book, SIDE_SHORT).iter().map(|t| t.0).collect();
+        assert_eq!(idxs, vec![a, c]);
     }
 
     #[test]
-    fn test_first_active_skips_exhausted() {
+    fn test_first_live_skips_dead() {
         let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-
+        // Best price (lowest ask) is exhausted; next is expired; third is live.
         let a = book.alloc_node().unwrap();
-        let b = book.alloc_node().unwrap();
-        let mut na = mk_intent(SIDE_LONG, 100, 600, 1, 1);
-        na.contracts_remaining = 0; // exhausted
-        let nb = mk_intent(SIDE_LONG, 200, 700, 2, 2);
+        let mut na = mk_intent(SIDE_SHORT, 100, 1, 1);
+        na.contracts_remaining = 0;
         book.write_intent(a, na).unwrap();
-        book.write_intent(b, nb).unwrap();
-        insert(&mut book, SIDE_LONG, a).unwrap();
-        insert(&mut book, SIDE_LONG, b).unwrap();
-
-        let found = first_active_containing(&book, SIDE_LONG, 500).unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().0, b);
-    }
-
-    #[test]
-    fn test_overlapping_query_catches_nested_intervals() {
-        let mut buf = mk_book(64);
-        let mut book = BookMut::load(&mut buf).unwrap();
-
-        // Two short intervals nested strictly inside [100, 600], plus one
-        // far outside it.
-        let a = book.alloc_node().unwrap();
-        let b = book.alloc_node().unwrap();
-        let c = book.alloc_node().unwrap();
-        book.write_intent(a, mk_intent(SIDE_SHORT, 200, 300, 1, 1))
-            .unwrap();
-        book.write_intent(b, mk_intent(SIDE_SHORT, 400, 500, 2, 2))
-            .unwrap();
-        book.write_intent(c, mk_intent(SIDE_SHORT, 1000, 1100, 3, 3))
-            .unwrap();
         insert(&mut book, SIDE_SHORT, a).unwrap();
+
+        let b = book.alloc_node().unwrap();
+        let mut nb = mk_intent(SIDE_SHORT, 200, 2, 2);
+        nb.expiration_slot = 50;
+        book.write_intent(b, nb).unwrap();
         insert(&mut book, SIDE_SHORT, b).unwrap();
-        insert(&mut book, SIDE_SHORT, c).unwrap();
 
-        // [200,300] and [400,500] contain neither 100 nor 600, so point
-        // queries at the endpoints find nothing.
-        let mut pt = Vec::new();
-        for_each_containing(&book, SIDE_SHORT, 100, |i, _| {
-            pt.push(i);
-            true
-        })
-        .unwrap();
-        for_each_containing(&book, SIDE_SHORT, 600, |i, _| {
-            pt.push(i);
-            true
-        })
-        .unwrap();
-        assert!(pt.is_empty(), "point queries miss nested intervals");
+        let c = put(&mut book, SIDE_SHORT, 300, 3, 3);
 
-        // The overlap query finds both nested intervals and excludes the
-        // far one.
-        let mut hits = Vec::new();
-        for_each_overlapping(&book, SIDE_SHORT, 100, 600, |i, _| {
-            hits.push(i);
-            true
-        })
-        .unwrap();
-        assert_eq!(hits, vec![a, b]);
+        let found = first_live(&book, SIDE_SHORT, 100).unwrap();
+        assert_eq!(found.map(|(i, _)| i), Some(c));
     }
 
     #[test]
-    fn test_subtree_max_invariant_after_rotations() {
-        // Stress: insert many intervals and verify subtree_max is correct everywhere.
+    fn test_rb_invariants_after_many_inserts() {
         let mut buf = mk_book(512);
         let mut book = BookMut::load(&mut buf).unwrap();
-
-        let sides = [SIDE_LONG, SIDE_SHORT];
-        for (tree_side, _) in sides.iter().enumerate() {
-            let side = sides[tree_side];
+        for &side in &[SIDE_LONG, SIDE_SHORT] {
             let mut seq = 1u64;
-            for min in (10..200).step_by(7) {
-                let max = min + 50;
-                let idx = book.alloc_node().unwrap();
-                book.write_intent(idx, mk_intent(side, min, max, seq, seq))
-                    .unwrap();
-                insert(&mut book, side, idx).unwrap();
+            for price in (10..400).step_by(7) {
+                put(&mut book, side, price, seq, seq);
                 seq += 1;
             }
         }
-
-        // Verify invariant on each side's tree.
-        for &side in &sides {
-            verify_augment_invariant(&book, side);
+        for &side in &[SIDE_LONG, SIDE_SHORT] {
+            verify_rb(&book, side);
+            // Best-first prices must be monotone in the side's direction.
+            let prices: Vec<u64> =
+                best_first(&book, side).iter().map(|t| t.1).collect();
+            let mut sorted = prices.clone();
+            if side == SIDE_LONG {
+                sorted.sort_by(|a, b| b.cmp(a));
+            } else {
+                sorted.sort();
+            }
+            assert_eq!(prices, sorted, "best-first not monotone for side {}", side);
         }
     }
 
-    fn verify_augment_invariant(book: &BookMut, side: u8) {
+    fn verify_rb(book: &BookMut, side: u8) {
         let root = tree_root(book, side).unwrap();
-        verify_subtree(book, root);
+        assert_eq!(get_color(book, root).unwrap(), RB_BLACK, "root must be black");
+        black_height(book, root);
     }
 
-    fn verify_subtree(book: &BookMut, idx: u32) -> u64 {
+    /// Recurse: assert no red node has a red child, and that black-height is
+    /// equal across both children. Returns the subtree's black-height.
+    fn black_height(book: &BookMut, idx: u32) -> u32 {
         if idx == NULL_IDX {
-            return 0;
+            return 1;
         }
         let left = get_left(book, idx).unwrap();
         let right = get_right(book, idx).unwrap();
-        let lmax = verify_subtree(book, left);
-        let rmax = verify_subtree(book, right);
-        let self_max = book.intent(idx).unwrap().max_price_fp;
-        let expected = self_max.max(lmax).max(rmax);
-        let cached = book.intent(idx).unwrap().subtree_max_fp;
-        assert_eq!(cached, expected, "subtree_max mismatch at idx {}", idx);
-        expected
+        if get_color(book, idx).unwrap() == RB_RED {
+            assert_eq!(get_color(book, left).unwrap(), RB_BLACK, "red-red at {}", idx);
+            assert_eq!(get_color(book, right).unwrap(), RB_BLACK, "red-red at {}", idx);
+        }
+        let lh = black_height(book, left);
+        let rh = black_height(book, right);
+        assert_eq!(lh, rh, "black-height mismatch at idx {}", idx);
+        lh + if get_color(book, idx).unwrap() == RB_BLACK { 1 } else { 0 }
     }
 }

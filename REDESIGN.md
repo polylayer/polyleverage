@@ -37,18 +37,18 @@ referenced the range.
 
 ## Checklist
 
-- [ ] 1. `math/fixed.rs`: rename `overlap_midpoint`→`price_midpoint`, drop
+- [x] 1. `math/fixed.rs`: rename `overlap_midpoint`→`price_midpoint`, drop
   `range_overlap`/`validate_range`, add `validate_price_ticked`. Fix tests.
-- [ ] 2. `state/intent_book.rs`: `IntentNode` single `price_fp` + pad.
-- [ ] 3. `state/pmlc.rs`: reentry min/max → single price, grow `_reserved`.
-- [ ] 4. `state/intent_tree.rs`: side-aware key, drop augmentation, drop
+- [x] 2. `state/intent_book.rs`: `IntentNode` single `price_fp` + pad.
+- [x] 3. `state/pmlc.rs`: reentry min/max → single price, grow `_reserved`.
+- [x] 4. `state/intent_tree.rs`: side-aware key, drop augmentation, drop
   interval queries, add `for_each_best_first`/`first_live`/min-max. Rewrite tests.
-- [ ] 5. `processor/match_ix.rs`: rewrite `find_overlap_on_side`,
+- [x] 5. `processor/match_ix.rs`: rewrite `find_overlap_on_side`,
   `scan_for_first_valid_pair`, cross logic in `match_pair_core`. Rewrite tests.
-- [ ] 6. `processor/intent.rs`: `PostIntentArgs` single price, validation,
+- [x] 6. `processor/intent.rs`: `PostIntentArgs` single price, validation,
   node construction, inline-match call.
-- [ ] 7. `processor/reentry.rs` + `processor/substitute.rs`: single price.
-- [ ] 8. `instruction.rs`: `PostIntentArgs` single price.
-- [ ] 9. Build `cargo build-sbf` clean; `cargo test` (program unit tests) pass.
+- [x] 7. `processor/reentry.rs` + `processor/substitute.rs`: single price.
+- [x] 8. `instruction.rs`: `PostIntentArgs` single price.
+- [x] 9. Build `cargo build-sbf` clean; `cargo test` (program unit tests) pass.
 - [ ] 10. Update `polyleverage-simulator` driver + scenario + tests + benchmarks.
 - [ ] 11. Update `docs/architecture.md`.

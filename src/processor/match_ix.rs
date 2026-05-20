@@ -130,12 +130,11 @@ pub fn process_match_pair(
 
 /// Same accounts as `MatchPair`; finds the first valid pair on-chain.
 ///
-/// Scan order: iterate node slots linearly (post_seq order approximates), pick
-/// the earliest long with `contracts_remaining > 0 && !expired`, then look up
-/// a short whose range contains `long.min_price_fp` via the augmented interval
-/// tree (`O(log n + k)`). If none, fall back to shorts containing `long.max_price_fp`.
+/// The book is two price-sorted trees. The best (most aggressive) live long
+/// and short are each reached in `O(log n)`; they cross iff
+/// `long.price >= short.price`.
 ///
-/// Returns `MatchNotFound` if no pair exists.
+/// Returns `IntentNotFound` if no crossing pair exists.
 pub fn process_match_best_available(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -248,47 +247,49 @@ fn unpack_accounts<'a, 'info>(
 }
 
 // ---------------------------------------------------------------------------
-// On-chain scan: find the first long/short pair with overlap + remaining size
+// On-chain matching discovery
 // ---------------------------------------------------------------------------
 
-/// Find the first intent on `opposite_side` whose `[min, max]` range overlaps
-/// `[target_min, target_max]`, has `contracts_remaining > 0`, and isn't expired.
-/// Returns the intent `id`. Uses the interval tree's complete overlap query:
-/// `O(log n + k)`.
+/// Find the best live intent on `opposite_side` that crosses a taker resting
+/// at `taker_price`. A long crosses a short iff `long.price >= short.price`.
+/// `O(log n)` — the side's best-priced live order; if it doesn't cross,
+/// nothing worse-priced will. `skip_id` excludes one intent (the taker's own).
 pub fn find_overlap_on_side(
     book: &BookMut,
     opposite_side: u8,
-    target_min: u64,
-    target_max: u64,
+    taker_price: u64,
     now_slot: u64,
     skip_id: u64,
 ) -> Result<Option<u64>, ProgramError> {
     let mut found: Option<u64> = None;
-    intent_tree::for_each_overlapping(
-        book,
-        opposite_side,
-        target_min,
-        target_max,
-        |_idx, node| {
-            // `for_each_overlapping` already guarantees the range overlaps;
-            // only the liveness filters remain.
-            if node.contracts_remaining == 0
-                || node.expiration_slot <= now_slot
-                || node.id == skip_id
-            {
-                return true; // keep searching
-            }
+    intent_tree::for_each_best_first(book, opposite_side, |_idx, node| {
+        if node.contracts_remaining == 0
+            || node.expiration_slot <= now_slot
+            || node.id == skip_id
+        {
+            return true; // skip dead / self, keep walking
+        }
+        // First live candidate is this side's best price. It crosses the
+        // taker, or nothing does.
+        let crosses = if opposite_side == SIDE_SHORT {
+            taker_price >= node.price_fp // taker is long
+        } else {
+            node.price_fp >= taker_price // taker is short
+        };
+        if crosses {
             found = Some(node.id);
-            false // stop
-        },
-    )?;
+        }
+        false // stop at the first live candidate either way
+    })?;
     Ok(found)
 }
 
-/// Returns the first `(long_id, short_id)` pair where both have
-/// `contracts_remaining > 0`, neither is expired, and their ranges overlap.
-/// Longs are walked in `post_seq` (FIFO) order; the matching short is found
-/// with a complete interval-overlap query.
+/// Returns the best crossing `(long_id, short_id)` pair, or `None`.
+///
+/// The highest live bid and the lowest live ask are each reached in
+/// `O(log n)`; they cross iff `long.price >= short.price`, and if those two
+/// don't cross no pair does. Price-time priority falls out of the trees'
+/// best-first ordering.
 ///
 /// This is the permissionless backstop matcher. The hot path is keeper-driven
 /// `MatchPair`, which is handed the pair directly.
@@ -296,48 +297,14 @@ pub fn scan_for_first_valid_pair(
     book: &BookMut,
     now_slot: u64,
 ) -> Result<Option<(u64, u64)>, ProgramError> {
-    // Collect active longs in post_seq (FIFO) order.
-    let mut longs: Vec<&IntentNode> = Vec::new();
-    for slot in book.nodes.iter() {
-        if slot.tag() != NODE_TAG_INTENT {
-            continue;
+    let best_long = intent_tree::first_live(book, SIDE_LONG, now_slot)?;
+    let best_short = intent_tree::first_live(book, SIDE_SHORT, now_slot)?;
+    match (best_long, best_short) {
+        (Some((_, long)), Some((_, short))) if long.price_fp >= short.price_fp => {
+            Ok(Some((long.id, short.id)))
         }
-        let node: &IntentNode = bytemuck::from_bytes(&slot.bytes);
-        if node.side != SIDE_LONG {
-            continue;
-        }
-        if node.contracts_remaining == 0 {
-            continue;
-        }
-        if node.expiration_slot <= now_slot {
-            continue;
-        }
-        longs.push(node);
+        _ => Ok(None),
     }
-    longs.sort_by_key(|n| n.post_seq);
-
-    for long in longs {
-        let mut found_short: Option<u64> = None;
-        // Complete overlap query: every short whose range crosses the long's,
-        // including shorts nested strictly inside it.
-        intent_tree::for_each_overlapping(
-            book,
-            SIDE_SHORT,
-            long.min_price_fp,
-            long.max_price_fp,
-            |_idx, s| {
-                if s.contracts_remaining == 0 || s.expiration_slot <= now_slot {
-                    return true; // keep searching
-                }
-                found_short = Some(s.id);
-                false // stop
-            },
-        )?;
-        if let Some(short_id) = found_short {
-            return Ok(Some((long.id, short_id)));
-        }
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,14 +358,11 @@ pub fn match_pair_core(
             return Err(PolyleverageError::IntentNotFound.into());
         }
 
-        let (overlap_min, overlap_max) = math::range_overlap(
-            long.min_price_fp,
-            long.max_price_fp,
-            short.min_price_fp,
-            short.max_price_fp,
-        )
-        .ok_or(PolyleverageError::NoRangeOverlap)?;
-        let entry_fp = math::overlap_midpoint(overlap_min, overlap_max);
+        // A long crosses a short iff it will pay at least the short's ask.
+        if long.price_fp < short.price_fp {
+            return Err(PolyleverageError::NoRangeOverlap.into());
+        }
+        let entry_fp = math::price_midpoint(long.price_fp, short.price_fp);
 
         let _requested_n = long
             .contracts_remaining
@@ -478,8 +442,8 @@ pub fn match_pair_core(
                 taker_is_long,
                 long_reentry: (long.flags & INTENT_FLAG_REENTRY) != 0,
                 short_reentry: (short.flags & INTENT_FLAG_REENTRY) != 0,
-                long_range: (long.min_price_fp, long.max_price_fp),
-                short_range: (short.min_price_fp, short.max_price_fp),
+                long_price: long.price_fp,
+                short_price: short.price_fp,
             },
             pmlc_id,
             bump,
@@ -692,11 +656,9 @@ pub fn match_pair_core(
         size_fp_hi: (size_fp >> 64) as u64,
         opened_slot: now_slot,
         last_mark_slot: now_slot,
-        long_reentry_min_fp: match_result.long_range.0,
-        long_reentry_max_fp: match_result.long_range.1,
-        short_reentry_min_fp: match_result.short_range.0,
-        short_reentry_max_fp: match_result.short_range.1,
-        _reserved: [0; 32],
+        long_reentry_price_fp: match_result.long_price,
+        short_reentry_price_fp: match_result.short_price,
+        _reserved: [0; 48],
     };
 
     msg!(
@@ -719,8 +681,8 @@ struct MatchResult {
     taker_is_long: bool,
     long_reentry: bool,
     short_reentry: bool,
-    long_range: (u64, u64),
-    short_range: (u64, u64),
+    long_price: u64,
+    short_price: u64,
 }
 
 /// Linear scan: find intent by id. Works for both sides; returns the side tag
@@ -750,7 +712,7 @@ mod tests {
         buf
     }
 
-    fn mk_intent(side: u8, min: u64, max: u64, seq: u64, id: u64) -> IntentNode {
+    fn mk_intent(side: u8, price: u64, seq: u64, id: u64) -> IntentNode {
         IntentNode {
             tag: NODE_TAG_INTENT,
             side,
@@ -760,9 +722,8 @@ mod tests {
             right: NULL_IDX,
             parent: NULL_IDX,
             _pad0: [0; 2],
-            min_price_fp: min,
-            max_price_fp: max,
-            subtree_max_fp: max,
+            price_fp: price,
+            _pad1: [0; 2],
             id,
             owner_seat: 1,
             contracts_total: 1,
@@ -774,39 +735,58 @@ mod tests {
         }
     }
 
+    fn put(book: &mut BookMut, side: u8, price: u64, seq: u64, id: u64) {
+        let idx = book.alloc_node().unwrap();
+        book.write_intent(idx, mk_intent(side, price, seq, id)).unwrap();
+        intent_tree::insert(book, side, idx).unwrap();
+    }
+
     #[test]
-    fn scan_finds_pair_with_short_nested_in_long() {
+    fn scan_finds_crossing_pair() {
         let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-        // Long [100, 600]; short [200, 300] nested strictly inside it. The
-        // short contains neither of the long's endpoints, so only a
-        // complete overlap query finds this pair.
-        let l = book.alloc_node().unwrap();
-        let s = book.alloc_node().unwrap();
-        book.write_intent(l, mk_intent(SIDE_LONG, 100, 600, 1, 1)).unwrap();
-        book.write_intent(s, mk_intent(SIDE_SHORT, 200, 300, 2, 2)).unwrap();
-        intent_tree::insert(&mut book, SIDE_LONG, l).unwrap();
-        intent_tree::insert(&mut book, SIDE_SHORT, s).unwrap();
-
+        // Long bids 600, short asks 300 → long.price >= short.price → cross.
+        put(&mut book, SIDE_LONG, 600, 1, 1);
+        put(&mut book, SIDE_SHORT, 300, 2, 2);
         assert_eq!(scan_for_first_valid_pair(&book, 0).unwrap(), Some((1, 2)));
     }
 
     #[test]
-    fn find_overlap_matches_nested_range_and_rejects_disjoint() {
+    fn scan_rejects_non_crossing_book() {
         let mut buf = mk_book(64);
         let mut book = BookMut::load(&mut buf).unwrap();
-        let s = book.alloc_node().unwrap();
-        book.write_intent(s, mk_intent(SIDE_SHORT, 200, 300, 1, 7)).unwrap();
-        intent_tree::insert(&mut book, SIDE_SHORT, s).unwrap();
+        // Long bids only 200, short asks 500 → spread, no cross.
+        put(&mut book, SIDE_LONG, 200, 1, 1);
+        put(&mut book, SIDE_SHORT, 500, 2, 2);
+        assert_eq!(scan_for_first_valid_pair(&book, 0).unwrap(), None);
+    }
 
-        // Query interval fully contains the short.
+    #[test]
+    fn scan_picks_best_priced_pair() {
+        let mut buf = mk_book(64);
+        let mut book = BookMut::load(&mut buf).unwrap();
+        // Two longs, two shorts. Best bid = 700, best ask = 300.
+        put(&mut book, SIDE_LONG, 500, 1, 1);
+        put(&mut book, SIDE_LONG, 700, 2, 2);
+        put(&mut book, SIDE_SHORT, 400, 3, 3);
+        put(&mut book, SIDE_SHORT, 300, 4, 4);
+        assert_eq!(scan_for_first_valid_pair(&book, 0).unwrap(), Some((2, 4)));
+    }
+
+    #[test]
+    fn find_overlap_matches_crossing_and_rejects_spread() {
+        let mut buf = mk_book(64);
+        let mut book = BookMut::load(&mut buf).unwrap();
+        put(&mut book, SIDE_SHORT, 300, 1, 7);
+
+        // A long taker bidding 600 crosses the 300 ask.
         assert_eq!(
-            find_overlap_on_side(&book, SIDE_SHORT, 100, 600, 0, u64::MAX).unwrap(),
+            find_overlap_on_side(&book, SIDE_SHORT, 600, 0, u64::MAX).unwrap(),
             Some(7)
         );
-        // Disjoint query interval finds nothing.
+        // A long taker bidding only 200 does not.
         assert_eq!(
-            find_overlap_on_side(&book, SIDE_SHORT, 700, 800, 0, u64::MAX).unwrap(),
+            find_overlap_on_side(&book, SIDE_SHORT, 200, 0, u64::MAX).unwrap(),
             None
         );
     }

@@ -169,19 +169,17 @@ fn do_substitute(
             return Err(PolyleverageError::IntentNotFound.into());
         }
 
-        // Require overlap to contain the PMLC entry (Carol's implicit consent).
-        let (overlap_min, overlap_max) = math::range_overlap(
-            long.min_price_fp,
-            long.max_price_fp,
-            short.min_price_fp,
-            short.max_price_fp,
-        )
-        .ok_or(PolyleverageError::NoRangeOverlap)?;
-        if pmlc_entry_fp < overlap_min || pmlc_entry_fp > overlap_max {
+        // The intents must cross, and the PMLC entry must lie in the
+        // crossing band [short.price, long.price] — the counterparty's
+        // implicit consent to the substitution.
+        if long.price_fp < short.price_fp {
+            return Err(PolyleverageError::NoRangeOverlap.into());
+        }
+        if pmlc_entry_fp < short.price_fp || pmlc_entry_fp > long.price_fp {
             return Err(PolyleverageError::NoRangeOverlap.into());
         }
 
-        let match_midpoint = math::overlap_midpoint(overlap_min, overlap_max);
+        let match_midpoint = math::price_midpoint(long.price_fp, short.price_fp);
 
         let long_trader = book.seat(long.owner_seat)?.trader;
         let short_trader = book.seat(short.owner_seat)?.trader;

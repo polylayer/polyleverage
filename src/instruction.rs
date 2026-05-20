@@ -52,8 +52,9 @@ pub struct WithdrawArgs {
 #[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]
 pub struct PostIntentArgs {
     pub side: u8, // SIDE_LONG | SIDE_SHORT
-    pub min_price_fp: u64,
-    pub max_price_fp: u64,
+    /// Limit price (18-decimal fixed point), tick-aligned. A long fills at
+    /// this price or lower; a short at this price or higher.
+    pub price_fp: u64,
     pub contracts: u16,
     pub expiration_slot: u64,
     pub reentry_enabled: u8,

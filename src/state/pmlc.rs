@@ -55,14 +55,12 @@ pub struct Pmlc {
     pub opened_slot: u64,
     pub last_mark_slot: u64,
 
-    /// Reentry entry-range for the long side (valid iff flags & LONG_REENTRY).
-    pub long_reentry_min_fp: u64,
-    pub long_reentry_max_fp: u64,
-    /// Reentry entry-range for the short side (valid iff flags & SHORT_REENTRY).
-    pub short_reentry_min_fp: u64,
-    pub short_reentry_max_fp: u64,
+    /// Reentry limit price for the long side (valid iff flags & LONG_REENTRY).
+    pub long_reentry_price_fp: u64,
+    /// Reentry limit price for the short side (valid iff flags & SHORT_REENTRY).
+    pub short_reentry_price_fp: u64,
 
-    pub _reserved: [u8; 32],
+    pub _reserved: [u8; 48],
 }
 
 pub const PMLC_LEN: usize = 1
@@ -88,9 +86,7 @@ pub const PMLC_LEN: usize = 1
     + 8
     + 8
     + 8
-    + 8
-    + 8
-    + 32;
+    + 48;
 const_assert_size!(Pmlc, PMLC_LEN);
 
 impl Pmlc {
