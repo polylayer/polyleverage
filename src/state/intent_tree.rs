@@ -731,4 +731,92 @@ mod tests {
         assert_eq!(lh, rh, "black-height mismatch at idx {}", idx);
         lh + if get_color(book, idx).unwrap() == RB_BLACK { 1 } else { 0 }
     }
+
+    // --- Property-based invariant tests -------------------------------------
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+
+            /// A random insert/remove sequence must, after every operation,
+            /// leave a valid red-black tree whose in-order traversal is
+            /// best-first (price-monotone in the side's direction) and
+            /// holds exactly the live node set.
+            #[test]
+            fn prop_rb_invariants_under_churn(
+                long_side in any::<bool>(),
+                ops in prop::collection::vec((any::<bool>(), 1u64..1000u64), 1..150),
+            ) {
+                let side = if long_side { SIDE_LONG } else { SIDE_SHORT };
+                let mut buf = mk_book(256);
+                let mut book = BookMut::load(&mut buf).unwrap();
+                let mut live: Vec<u32> = Vec::new();
+                let mut seq = 1u64;
+                for (insert, price) in ops {
+                    if insert || live.is_empty() {
+                        let idx = put(&mut book, side, price, seq, seq);
+                        live.push(idx);
+                        seq += 1;
+                    } else {
+                        let victim = live.remove(price as usize % live.len());
+                        remove(&mut book, side, victim).unwrap();
+                        book.free_node(victim).unwrap();
+                    }
+                    verify_rb(&book, side);
+                    let bf = best_first(&book, side);
+                    prop_assert_eq!(bf.len(), live.len());
+                    for w in bf.windows(2) {
+                        if side == SIDE_LONG {
+                            prop_assert!(w[0].1 >= w[1].1);
+                        } else {
+                            prop_assert!(w[0].1 <= w[1].1);
+                        }
+                    }
+                }
+            }
+
+            /// `first_live` returns the best-priced intent that is not
+            /// exhausted — highest bid / lowest ask, FIFO tiebreak.
+            #[test]
+            fn prop_first_live_picks_best_live(
+                long_side in any::<bool>(),
+                entries in prop::collection::vec((1u64..1000u64, any::<bool>()), 1..40),
+            ) {
+                let side = if long_side { SIDE_LONG } else { SIDE_SHORT };
+                let mut buf = mk_book(64);
+                let mut book = BookMut::load(&mut buf).unwrap();
+                let mut model: Vec<(u64, u64)> = Vec::new(); // (price, seq)
+                let mut seq = 1u64;
+                for (price, alive) in entries {
+                    let idx = book.alloc_node().unwrap();
+                    let mut n = mk_intent(side, price, seq, seq);
+                    if !alive {
+                        n.contracts_remaining = 0;
+                    }
+                    book.write_intent(idx, n).unwrap();
+                    insert(&mut book, side, idx).unwrap();
+                    if alive {
+                        model.push((price, seq));
+                    }
+                    seq += 1;
+                }
+                let got = first_live(&book, side, 0).unwrap();
+                // Best = lowest (price, seq) key, with price inverted for longs.
+                let key = |p: u64, s: u64| {
+                    if side == SIDE_LONG { (u64::MAX - p, s) } else { (p, s) }
+                };
+                match model.iter().min_by_key(|(p, s)| key(*p, *s)) {
+                    Some(&(price, seq)) => {
+                        let g = got.expect("a live intent exists");
+                        prop_assert_eq!(g.1.price_fp, price);
+                        prop_assert_eq!(g.1.post_seq, seq);
+                    }
+                    None => prop_assert!(got.is_none()),
+                }
+            }
+        }
+    }
 }

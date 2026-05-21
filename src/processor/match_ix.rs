@@ -814,4 +814,52 @@ mod tests {
             Err(ProgramError::Custom(code)) if code == PolyleverageError::InvalidContractCount as u32
         ));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Over a random book, `scan_for_first_valid_pair` returns the
+            /// highest bid against the lowest ask, and a pair exists iff
+            /// the best bid is at least the best ask.
+            #[test]
+            fn prop_scan_returns_best_crossing_pair(
+                longs in prop::collection::vec(1u64..1000u64, 0..16),
+                shorts in prop::collection::vec(1u64..1000u64, 0..16),
+            ) {
+                let mut buf = mk_book(64);
+                let mut book = BookMut::load(&mut buf).unwrap();
+                let mut seq = 1u64;
+                // Track the best (price, id) per side as posted.
+                let mut best_long: Option<(u64, u64)> = None;
+                for &p in &longs {
+                    put(&mut book, SIDE_LONG, p, seq, seq);
+                    best_long = Some(match best_long {
+                        Some(b) if b.0 >= p => b, // earlier post wins ties
+                        _ => (p, seq),
+                    });
+                    seq += 1;
+                }
+                let mut best_short: Option<(u64, u64)> = None;
+                for &p in &shorts {
+                    put(&mut book, SIDE_SHORT, p, seq, seq);
+                    best_short = Some(match best_short {
+                        Some(b) if b.0 <= p => b, // earlier post wins ties
+                        _ => (p, seq),
+                    });
+                    seq += 1;
+                }
+                let got = scan_for_first_valid_pair(&book, 0).unwrap();
+                match (best_long, best_short) {
+                    (Some(l), Some(s)) if l.0 >= s.0 => {
+                        prop_assert_eq!(got, Some((l.1, s.1)));
+                    }
+                    _ => prop_assert!(got.is_none()),
+                }
+            }
+        }
+    }
 }
