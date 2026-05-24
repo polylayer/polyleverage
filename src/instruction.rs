@@ -37,6 +37,11 @@ pub struct CreateInstrumentArgs {
     pub liquidation_bounty_bps: u16,
     pub max_staleness_secs: u64,
     pub initial_book_capacity: u32,
+    /// Off-chain attestor reference ceiling, whole USD. Required
+    /// (non-zero) for `source = PYTH`; must be `0` for
+    /// `source = POLYMARKET`. See
+    /// `state::instrument_config::InstrumentConfig::reference_usd`.
+    pub reference_usd: u64,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]

@@ -200,6 +200,7 @@ pub fn process_create_instrument(
         args.liquidation_bps,
         args.liquidation_bounty_bps,
         args.max_staleness_secs,
+        args.reference_usd,
         instrument_bump,
     )?;
     drop(instr_data);

@@ -91,11 +91,22 @@ pub struct InstrumentConfig {
     /// Attestation freshness bound in seconds (wrapper signature staleness).
     pub max_staleness_secs: u64,
 
-    pub _reserved: [u8; 48],
+    /// Off-chain attestor reference ceiling, whole USD. Pyth instruments
+    /// only — the attestor normalizes a Pyth dollar price into the
+    /// program's `(0, 1e18)` fixed-point via
+    /// `price_fp = raw * 10^(18+expo) / reference_usd`
+    /// (see `docs/internal/POLYLEVERAGE_MULTIASSET.md` §3). Set to `0`
+    /// for `POLYMARKET` instruments (unused). Stored on-chain so the
+    /// reference is discoverable from the InstrumentConfig itself —
+    /// the program never reads it (zero validation impact); it's
+    /// metadata the off-chain TEE decodes via `decode_instrument`.
+    pub reference_usd: u64,
+
+    pub _reserved: [u8; 40],
 }
 
 pub const INSTRUMENT_CONFIG_LEN: usize =
-    1 + 1 + 1 + 1 + 4 + 32 + 32 + 32 + 32 + 32 + 4 + 4 + 8 + 8 + 8 + 4 + 2 + 2 + 8 + 48;
+    1 + 1 + 1 + 1 + 4 + 32 + 32 + 32 + 32 + 32 + 4 + 4 + 8 + 8 + 8 + 4 + 2 + 2 + 8 + 8 + 40;
 const_assert_size!(InstrumentConfig, INSTRUMENT_CONFIG_LEN);
 
 impl InstrumentConfig {
@@ -184,6 +195,7 @@ impl InstrumentConfig {
         liquidation_bps: u32,
         liquidation_bounty_bps: u16,
         max_staleness_secs: u64,
+        reference_usd: u64,
         bump: u8,
     ) -> Result<(), ProgramError> {
         let c: &mut InstrumentConfig = pod::try_cast_mut(bytes)?;
@@ -192,6 +204,22 @@ impl InstrumentConfig {
         }
         if !source::is_known(source) {
             return Err(PolyleverageError::InvalidInstructionData.into());
+        }
+        // PYTH instruments must declare a non-zero reference; POLYMARKET
+        // instruments must leave it at zero (the off-chain attestor
+        // ignores it for binary outcomes).
+        match source {
+            source::PYTH => {
+                if reference_usd == 0 {
+                    return Err(PolyleverageError::InvalidInstructionData.into());
+                }
+            }
+            source::POLYMARKET => {
+                if reference_usd != 0 {
+                    return Err(PolyleverageError::InvalidInstructionData.into());
+                }
+            }
+            _ => return Err(PolyleverageError::InvalidInstructionData.into()),
         }
         Self::validate_bucket_config(leverage_bps, collateral_bucket, tick_fp)?;
         *c = InstrumentConfig {
@@ -214,7 +242,8 @@ impl InstrumentConfig {
             liquidation_bounty_bps,
             _pad2: [0; 2],
             max_staleness_secs,
-            _reserved: [0; 48],
+            reference_usd,
+            _reserved: [0; 40],
         };
         Ok(())
     }
